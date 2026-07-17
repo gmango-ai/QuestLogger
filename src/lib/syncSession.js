@@ -128,6 +128,19 @@ export async function endSyncSession(sessionId) {
 // participating in any session. Used on cold loads so a user who
 // joined on device A automatically shows up synced on device B without
 // having to manually re-enter the join code.
+// Push out a meeting room's auto-close time by p_minutes. Any active
+// participant may extend (server-enforced). Returns the updated session row so
+// the caller can optimistically reflect the new expires_at before realtime
+// catches up.
+export async function extendRoomSession(sessionId, minutes = 15) {
+  const { data, error } = await supabase.rpc("extend_room_session", {
+    p_session_id: sessionId,
+    p_minutes: minutes,
+  });
+  if (error) return { error };
+  return { data: Array.isArray(data) ? data[0] : data };
+}
+
 export async function findMyActiveSyncSession() {
   const { data, error } = await supabase.rpc("find_my_active_sync_session");
   if (error) return { error };
