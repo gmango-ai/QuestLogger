@@ -57,6 +57,7 @@ export function normalizeSettings(row) {
     wageMode: row.wage_mode || "hourly",
     annualSalary: row.annual_salary ?? null,
     offHoursWarn: row.off_hours_warn ?? true,
+    shareFreebusy: row.share_freebusy_with_team ?? false,
     oooStart: row.ooo_start || null,
     oooEnd: row.ooo_end || null,
     oooNote: row.ooo_note || "",

@@ -1347,6 +1347,7 @@ export function AppProvider({ session, children }) {
     if ("wageMode" in patch) dbPatch.wage_mode = patch.wageMode || "hourly";
     if ("annualSalary" in patch) dbPatch.annual_salary = patch.annualSalary ?? null;
     if ("offHoursWarn" in patch) dbPatch.off_hours_warn = patch.offHoursWarn;
+    if ("shareFreebusy" in patch) dbPatch.share_freebusy_with_team = patch.shareFreebusy;
     if ("oooStart" in patch) dbPatch.ooo_start = patch.oooStart || null;
     if ("oooEnd" in patch) dbPatch.ooo_end = patch.oooEnd || null;
     if ("oooNote" in patch) dbPatch.ooo_note = patch.oooNote || null;

@@ -444,5 +444,10 @@ verify_jwt = true
 [functions.device-pair]
 verify_jwt = false
 
+# calendar-freebusy reads teammates' stored Google tokens (service role) to
+# return their busy/free — must require a valid user JWT.
+[functions.calendar-freebusy]
+verify_jwt = true
+
 [functions.news-feed]
 verify_jwt = true

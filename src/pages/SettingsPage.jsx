@@ -487,6 +487,17 @@ function AvailabilitySection({ dark }) {
         </div>
       </SectionCard>
 
+      <SectionCard title="Scheduling availability" hint="Powers the calendar's “Find a time” scheduler. Only applies if you've connected Google Calendar — it shares busy/free times (no event titles or details) so teammates can book around you. Off by default." dark={dark}>
+        <div className="flex items-center gap-2.5">
+          <button type="button" role="switch" aria-checked={!!settings?.shareFreebusy}
+            onClick={() => commit({ shareFreebusy: !settings?.shareFreebusy })}
+            className={`relative shrink-0 w-10 h-6 rounded-full transition-colors ${settings?.shareFreebusy ? "bg-[var(--color-accent)]" : dark ? "bg-slate-600" : "bg-slate-300"}`}>
+            <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${settings?.shareFreebusy ? "translate-x-4" : ""}`} />
+          </button>
+          <span className={`text-sm ${dark ? "text-slate-300" : "text-slate-700"}`}>Let teammates see when I'm busy (times only, no event details)</span>
+        </div>
+      </SectionCard>
+
       <SectionCard title="Lunch break" hint="At your lunch time, flip your status to Out to lunch — automatically or after a prompt. Logs a break (paid/unpaid below)." dark={dark}>
         <div className="flex flex-col gap-3">
           <div className="flex gap-1.5">

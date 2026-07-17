@@ -33,18 +33,18 @@ function isoTime(d) {
 
 // `room` = fixed room (office flow). `rooms` + no `room` = calendar flow with a
 // room picker. `initialStart` prefills from a slot; `meeting` (row) = edit mode.
-export default function ScheduleMeetingModal({ room, rooms, teamId, dark, initialStart, meeting, onClose, onCreated, onDeleted }) {
+export default function ScheduleMeetingModal({ room, rooms, teamId, dark, initialStart, initialAttendeeIds, initialExternalEmails, initialDuration, initialRoomId, meeting, onClose, onCreated, onDeleted }) {
   const { session, googleToken, googleTokenExpiry, createCalendarEvent, updateCalendarEvent, deleteCalendarEvent } = useApp();
   const hasGoogle = !!googleToken && Date.now() < googleTokenExpiry;
   const editing = !!meeting;
 
   // Any room can host a scheduled meeting (teams often meet in general rooms).
   const roomOptions = room ? [] : (rooms || []);
-  const [roomId, setRoomId] = useState(meeting?.room_id || room?.id || roomOptions[0]?.id || "");
+  const [roomId, setRoomId] = useState(meeting?.room_id || room?.id || initialRoomId || roomOptions[0]?.id || "");
   const effRoom = room || (rooms || []).find((r) => r.id === roomId) || null;
 
   const startInit = meeting ? new Date(meeting.starts_at) : (initialStart || null);
-  const durInit = meeting ? Math.max(5, Math.round((new Date(meeting.ends_at) - new Date(meeting.starts_at)) / 60000)) : 30;
+  const durInit = meeting ? Math.max(5, Math.round((new Date(meeting.ends_at) - new Date(meeting.starts_at)) / 60000)) : (initialDuration || 30);
 
   const [title, setTitle] = useState(meeting?.title || (effRoom?.name ? `${effRoom.name} meeting` : "Meeting"));
   const [description, setDescription] = useState(meeting?.description || "");
@@ -60,8 +60,8 @@ export default function ScheduleMeetingModal({ room, rooms, teamId, dark, initia
   // ── attendees + timezone preview ──
   const { teamMembers } = useTeam();
   const otherMembers = (teamMembers || []).filter((m) => m.user_id && m.user_id !== session?.user?.id);
-  const [attendeeIds, setAttendeeIds] = useState(() => new Set(meeting?.attendee_ids || []));
-  const [externalEmails, setExternalEmails] = useState((meeting?.attendee_emails || []).join(", "));
+  const [attendeeIds, setAttendeeIds] = useState(() => new Set(meeting?.attendee_ids || initialAttendeeIds || []));
+  const [externalEmails, setExternalEmails] = useState((meeting?.attendee_emails || initialExternalEmails || []).join(", "));
   const [memberProfiles, setMemberProfiles] = useState({});
 
   useEffect(() => {
