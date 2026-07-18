@@ -627,7 +627,9 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
     session?.user?.email?.split("@")[0] ||
     "";
 
-  const collabEnabled = !loading && !!board?.id;
+  // Read-only (e.g. the public /w/:id viewer) never joins the realtime channel:
+  // it renders the snapshot statically and must not send/apply broadcast ops.
+  const collabEnabled = !loading && !!board?.id && !readOnly;
 
   // ── undo / redo (entity-scoped, multiplayer-safe). Set up BEFORE sync so it
   // can hand sync its onRemoteApply seam (peer edits fold into the baseline
@@ -1394,7 +1396,7 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
     boardId, embedded, rf,
     nodes, edges, setNodes, setEdges,
     board, setBoard, loading, setLoading, setError, setSaveState,
-    setTitleDraft, setGoalDraft,
+    setTitleDraft, setGoalDraft, readOnly,
   });
 
   // ── handlers ──
@@ -2182,6 +2184,7 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
   // only the paste event exposes clipboard contents.
   useEffect(() => {
     function onPaste(e) {
+      if (readOnly) return;
       const el = document.activeElement;
       if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
       const boardEl = mainRef.current;
@@ -2197,7 +2200,7 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
     }
     window.addEventListener("paste", onPaste);
     return () => window.removeEventListener("paste", onPaste);
-  }, [addImageNode]);
+  }, [addImageNode, readOnly]);
 
   // Double-click empty canvas → drop a text node at the cursor, ready to type.
   // Gated to the pane itself so double-clicking a node still just edits it.
@@ -2455,7 +2458,7 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
     copyRef, cutRef, cloneRef,
     cancelAreaSelection, deleteAreaSelection, areaSelRef,
     reorderSelected, bumpSelectedFontSize,
-    mainRef, lastClientRef,
+    mainRef, lastClientRef, readOnly,
   });
   const bottomStackOffset = 15 + toolbarH + BOTTOM_PANEL_GAP;
   const brushStackH = tool === "brush" ? PAINT_TOOLBAR_STACK_H : 0;
@@ -2474,7 +2477,7 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
   // Title / goal / archive — same flow as the prior page, just leaning
   // on the existing setters in lib/whiteboard.
   async function handleSaveTitle() {
-    if (!board) return;
+    if (!board || readOnly) return;
     const next = titleDraft.trim() || "Untitled whiteboard";
     const { error: err } = await setWhiteboardTitle(board.id, next);
     if (err) {
@@ -2485,7 +2488,7 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
     setTitleEditing(false);
   }
   async function handleSaveGoal() {
-    if (!board) return;
+    if (!board || readOnly) return;
     const next = goalDraft.trim();
     const { error: err } = await setWhiteboardGoal(board.id, next);
     if (err) {
@@ -2711,10 +2714,10 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
         onNodeDragStart={onNodeDragStartClone}
         onNodeDragStop={onNodeDragStop}
         onNodeClick={onNodeClick}
-        onDoubleClick={tool === "select" ? onPaneDoubleClick : undefined}
+        onDoubleClick={tool === "select" && !readOnly ? onPaneDoubleClick : undefined}
         onMoveEnd={(_, vp) => { if (!embedded) saveViewport(board?.id, vp); }}
         onDragOver={onWbDragOver}
-        onDrop={onWbDrop}
+        onDrop={readOnly ? undefined : onWbDrop}
         zoomOnDoubleClick={false}
         connectionMode={ConnectionMode.Loose}
         connectionLineComponent={ConnectionLine}
@@ -2729,9 +2732,9 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
         // you can gesture over the board without disturbing it.
         // Node drag is off while a floating region selection is active — the
         // selection overlay owns the move then.
-        nodesDraggable={tool === "select" && !areaSel}
-        nodesConnectable={tool === "select"}
-        elementsSelectable={tool === "select"}
+        nodesDraggable={tool === "select" && !areaSel && !readOnly}
+        nodesConnectable={tool === "select" && !readOnly}
+        elementsSelectable={tool === "select" && !readOnly}
         // Region select is folded into the select tool: desktop left-drag on the
         // pane draws OUR box (onWbPointerDownCapture), which now marks the nodes it
         // covers `selected` LIVE (so they highlight as it passes, and the align +
@@ -2966,6 +2969,7 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
             width (100% — a React Flow Panel is positioned within it), so an
             embedded room panel scrolls the rail instead of clipping it; w-max
             sizes to content up to that cap. */}
+        {!readOnly && (
         <Panel position="bottom-left" className="w-max max-w-[calc(100%-16px)]">
           <div
             ref={toolbarRef}
@@ -3094,6 +3098,7 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
           )}
           </div>
         </Panel>
+        )}
 
         {/* Node inspector (shape/fill/border/text) hovers above the
               selected node, like the edge toolbar. Edges use their own
@@ -3215,7 +3220,7 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
           floating tool picker; new nodes spawn right where the palette sits (the
           cursor). The centre is an "X" that clears the selection and drops back
           to select mode. Works even when the left toolbar is collapsed. */}
-      {palette && (
+      {palette && !readOnly && (
         <>
           <div className="fixed inset-0 z-[59]" onClick={() => setPalette(null)} aria-hidden />
           <div
@@ -3337,13 +3342,13 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
               className={`text-sm font-bold inline-flex items-center gap-1.5 cursor-text max-w-[220px] ${
                 dark ? "text-slate-100" : "text-slate-800"
               }`}
-              onDoubleClick={() => setTitleEditing(true)}
+              onDoubleClick={() => { if (!readOnly) setTitleEditing(true); }}
               title="Double-click to rename"
             >
               <span className="truncate">{board.title}</span>
               <button
                 type="button"
-                onClick={() => setTitleEditing(true)}
+                onClick={() => { if (!readOnly) setTitleEditing(true); }}
                 className={`opacity-50 hover:opacity-100 shrink-0 ${
                   dark ? "text-slate-300" : "text-slate-500"
                 }`}
@@ -3606,7 +3611,7 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
                 <span className="text-[8.5px] font-bold tracking-[0.13em] uppercase text-white/85">
                   Goal for next week
                 </span>
-                {!goalEditing && (
+                {!goalEditing && !readOnly && (
                   <button
                     type="button"
                     onClick={() => {
@@ -3669,7 +3674,8 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
             is toggleable; peers' emotes still render when it's hidden. */}
       <EmoteOverlay
         channelKey={`whiteboard:${board.id}`}
-        barPosition={emoteBarOn ? "bottom-center" : "hidden"}
+        enabled={!readOnly}
+        barPosition={!readOnly && emoteBarOn ? "bottom-center" : "hidden"}
         // Sit just above whatever's stacked at bottom-center: the measured
         // toolbar (panel margin 15 + height + gap), plus any paint/inspector
         // bars stacked above it.

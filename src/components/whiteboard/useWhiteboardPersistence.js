@@ -20,7 +20,7 @@ export function useWhiteboardPersistence({
   boardId, embedded, rf,
   nodes, edges, setNodes, setEdges,
   board, setBoard, loading, setLoading, setError, setSaveState,
-  setTitleDraft, setGoalDraft,
+  setTitleDraft, setGoalDraft, readOnly = false,
 }) {
   const lastSavedRef = useRef("");
   const saveTimerRef = useRef(null);
@@ -47,7 +47,9 @@ export function useWhiteboardPersistence({
       // Snapshot OR template seed.
       let snap = data.snapshot;
       if (!snap || isEmptySnapshot(snap)) {
-        if (!seededRef.current) {
+        if (readOnly) {
+          snap = { nodes: [], edges: [] }; // never seed a template for a read-only viewer
+        } else if (!seededRef.current) {
           seededRef.current = true;
           snap = templateSnapshotFor(data.template_key);
         } else {
@@ -92,6 +94,7 @@ export function useWhiteboardPersistence({
   // gated on the serialized snapshot diff so things like cursor moves
   // that don't change state don't burn writes.
   useEffect(() => {
+    if (readOnly) return; // read-only viewers never write
     if (!board?.id) return;
     if (loading) return;
     setSaveState("dirty");
@@ -126,6 +129,7 @@ export function useWhiteboardPersistence({
 
   // Flush pending edits on unmount / tab close.
   useEffect(() => {
+    if (readOnly) return undefined;
     function flush() {
       if (!saveTimerRef.current || !board?.id) return;
       clearTimeout(saveTimerRef.current);

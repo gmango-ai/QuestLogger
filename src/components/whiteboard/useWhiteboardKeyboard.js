@@ -21,7 +21,7 @@ export function useWhiteboardKeyboard({
   copyRef, cutRef, cloneRef,
   cancelAreaSelection, deleteAreaSelection, areaSelRef,
   reorderSelected, bumpSelectedFontSize,
-  mainRef, lastClientRef,
+  mainRef, lastClientRef, readOnly = false,
 }) {
   useEffect(() => {
     function onKey(e) {
@@ -35,6 +35,21 @@ export function useWhiteboardKeyboard({
         return;
       const board = mainRef.current;
       if (!board || !(board.matches(":hover") || board.contains(el))) return;
+      // Read-only (public viewer): allow ONLY navigation — no tool switch,
+      // node edit, undo/redo, copy/cut/clone, reorder, or font changes.
+      if (readOnly) {
+        const modRO = e.metaKey || e.ctrlKey;
+        if (modRO && (e.key === "=" || e.key === "+")) { e.preventDefault(); rf.zoomIn({ duration: 150 }); }
+        else if (modRO && e.key === "-") { e.preventDefault(); rf.zoomOut({ duration: 150 }); }
+        else if (modRO && e.key === "0") { e.preventDefault(); rf.zoomTo(1, { duration: 150 }); }
+        else if (e.shiftKey && e.key === "1") { e.preventDefault(); rf.fitView({ padding: 0.15, duration: 200 }); }
+        else if (e.key.startsWith("Arrow")) {
+          const step = e.shiftKey ? 200 : 60;
+          const d = { ArrowLeft: [step, 0], ArrowRight: [-step, 0], ArrowUp: [0, step], ArrowDown: [0, -step] }[e.key];
+          if (d) { e.preventDefault(); const vp = rf.getViewport(); rf.setViewport({ x: vp.x + d[0], y: vp.y + d[1], zoom: vp.zoom }); }
+        }
+        return;
+      }
       // A floating region selection intercepts Esc (cancel) + Delete/Backspace.
       if (areaSelRef.current) {
         if (e.key === "Escape") { e.preventDefault(); cancelAreaSelection(); setTool("select"); return; }
@@ -131,5 +146,5 @@ export function useWhiteboardKeyboard({
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [rf, undo, redo]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [rf, undo, redo, readOnly]); // eslint-disable-line react-hooks/exhaustive-deps
 }

@@ -14,7 +14,9 @@ import {
 import { uploadUserSound, deleteCustomSound } from "../lib/customSound";
 import { emailDomain, isLikelyCompanyEvent, googleRawToCompanyCandidate } from "../lib/calendar";
 
-const AppContext = createContext(null);
+// Exported so a provider-less surface (e.g. the public /w/:id whiteboard viewer)
+// can supply a minimal stand-in value instead of the full AppProvider.
+export const AppContext = createContext(null);
 
 export function AppProvider({ session, children }) {
   // ── Data state ───────────────────────────────────────────────

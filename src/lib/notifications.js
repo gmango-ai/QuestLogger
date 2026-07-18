@@ -16,6 +16,7 @@ export const NOTIFICATION_TYPES = [
   { type: "lunch_reminder", label: "Lunch reminder", description: "A nudge at your own scheduled lunch time.", channels: ["inapp", "desktop"] },
   { type: "reminder", label: "Wellbeing & break reminders", description: "Hydration, movement, eye rest and other nudges you turn on.", channels: ["inapp", "desktop"] },
   { type: "reminder_daily", label: "Daily log reminder", description: "A nudge if you haven't logged hours by your reminder time.", channels: ["inapp", "desktop"] },
+  { type: "whiteboard_invite", label: "Whiteboard shares", description: "A teammate shares an invite-only whiteboard with you.", channels: ["inapp", "desktop"] },
 ];
 
 export const typeMeta = (type) => NOTIFICATION_TYPES.find((t) => t.type === type) || null;

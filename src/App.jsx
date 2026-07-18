@@ -58,6 +58,7 @@ const TeamPage = lazy(() => import("./pages/TeamPage"));
 const TeamTimesheetsPage = lazy(() => import("./pages/TeamTimesheetsPage"));
 const WhiteboardsListPage = lazy(() => import("./pages/WhiteboardsListPage"));
 const WhiteboardPage = lazy(() => import("./pages/WhiteboardPage"));
+const PublicWhiteboardPage = lazy(() => import("./pages/PublicWhiteboardPage"));
 const OfficePage = lazy(() => import("./pages/OfficePage"));
 const MeetingSummariesPage = lazy(() => import("./pages/MeetingSummariesPage"));
 const CalendarPage = lazy(() => import("./pages/CalendarPage"));
@@ -617,6 +618,10 @@ export default function App() {
             path="/device"
             element={isDevice ? <DeviceKioskPage session={session} /> : session ? <Navigate to="/" replace /> : <DevicePairPage />}
           />
+          {/* Public read-only whiteboard — renders OUTSIDE the auth gate so
+              anyone with the link (even signed out) can view a scope='public'
+              board. RLS returns the row only when it's public. */}
+          <Route path="/w/:whiteboardId" element={<PublicWhiteboardPage />} />
           <Route
             path="/*"
             element={isDevice ? <DeviceKioskPage session={session} /> : session ? <AuthenticatedApp session={session} /> : <LocalTimerPage />}
