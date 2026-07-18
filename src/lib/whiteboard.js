@@ -101,9 +101,16 @@ export async function deleteWhiteboardTemplate(id) {
 // `memberCount` (so the list can badge Private vs Invite-only). Off by default
 // so other callers (e.g. the room WhiteboardPicker) are unchanged.
 const WB_COLS = "id, team_id, scope, owner_id, title, template_key, goal, created_by, created_at, updated_at, archived_at";
+// The editor's board fetch: every column the editor reads (incl. the snapshot)
+// but NOT the thumbnail data URL — the editor only WRITES the thumbnail, never
+// reads it, so pulling it on every board open is wasted bytes on the hot path.
+const WB_EDITOR_COLS = `${WB_COLS}, snapshot`;
 export async function listTeamWhiteboards(teamId, { includeArchived = false, ownerId = null, includeShared = false } = {}) {
   if (!teamId && !ownerId) return { data: [], error: null };
-  let q = supabase.from("whiteboards").select(WB_COLS).order("updated_at", { ascending: false });
+  // Only the full list page (includeShared) needs the preview thumbnail; keep
+  // lean callers (e.g. the room WhiteboardPicker) from loading those data URLs.
+  const cols = includeShared ? `${WB_COLS}, thumbnail` : WB_COLS;
+  let q = supabase.from("whiteboards").select(cols).order("updated_at", { ascending: false });
   if (teamId && ownerId) {
     q = q.or(`and(scope.eq.org,team_id.eq.${teamId}),and(scope.eq.personal,owner_id.eq.${ownerId}),and(scope.eq.public,owner_id.eq.${ownerId})`);
   } else if (teamId) {
@@ -123,7 +130,7 @@ export async function listTeamWhiteboards(teamId, { includeArchived = false, own
     const have = new Set(boards.map((b) => b.id));
     const memIds = [...new Set((memRows || []).map((r) => r.whiteboard_id))].filter((id) => !have.has(id));
     if (memIds.length) {
-      let mq = supabase.from("whiteboards").select(WB_COLS).in("id", memIds).order("updated_at", { ascending: false });
+      let mq = supabase.from("whiteboards").select(cols).in("id", memIds).order("updated_at", { ascending: false });
       if (!includeArchived) mq = mq.is("archived_at", null);
       const { data: shared } = await mq;
       boards = boards.concat((shared || []).map((b) => ({ ...b, shared: true })));
@@ -176,7 +183,7 @@ export async function fetchWhiteboardById(whiteboardId) {
   if (!whiteboardId) return { data: null, error: null };
   const { data, error } = await supabase
     .from("whiteboards")
-    .select("*")
+    .select(WB_EDITOR_COLS)
     .eq("id", whiteboardId)
     .maybeSingle();
   return { data, error };
@@ -210,6 +217,14 @@ export async function createWhiteboard({ teamId, title, createdBy, snapshot, sco
 // under 200KB; complex flowcharts at a few hundred). If real-time
 // diffs land in Phase 2 we keep this as the snapshot-of-record and
 // layer ops on top.
+// Store a small preview thumbnail (JPEG data URL). Best-effort; gated by the
+// board's normal update RLS (owner/team/member).
+export async function saveWhiteboardThumbnail(whiteboardId, dataUrl) {
+  if (!whiteboardId || !dataUrl) return { error: null };
+  const { error } = await supabase.from("whiteboards").update({ thumbnail: dataUrl }).eq("id", whiteboardId);
+  return { error };
+}
+
 export async function saveSnapshot(whiteboardId, snapshot) {
   if (!whiteboardId) return { error: { message: "Missing whiteboardId." } };
   const { error } = await supabase

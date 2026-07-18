@@ -222,6 +222,9 @@ function BoardCard({ board, dark, isAdmin, userId, onSettings, onArchive, onUnar
   const updated = friendly(board.updated_at);
   const isOwner = ["personal", "public"].includes(board.scope) && board.owner_id === userId;
   const canManage = board.owner_id === userId || (board.scope === "org" && isAdmin);
+  // Only render (and raise above the stretched link) the actions row when it
+  // actually holds a control — otherwise it steals whole-card clicks.
+  const showActions = !board.shared && ((canManage && !archived) || isAdmin || isOwner);
   const badge = board.shared
     ? { label: "Shared", cls: dark ? "bg-emerald-500/15 text-emerald-300" : "bg-emerald-50 text-emerald-600" }
     : board.scope === "public"
@@ -234,20 +237,29 @@ function BoardCard({ board, dark, isAdmin, userId, onSettings, onArchive, onUnar
 
   return (
     <div
-      className={`rounded-2xl border p-4 flex flex-col gap-3 group transition-colors ${
+      className={`relative cursor-pointer rounded-2xl border p-4 flex flex-col gap-3 group transition-colors ${
         dark
           ? "bg-[var(--color-surface)] border-[var(--color-border-light)] hover:border-[var(--color-accent)]/40"
           : "bg-white border-slate-200 hover:border-[var(--color-accent)]/40 shadow-sm"
       } ${archived ? "opacity-70" : ""}`}
     >
+      {/* Preview (bleeds to the top edges). Under the stretched link, so a click
+          still opens the board. Falls back to the template icon. */}
+      <div className={`-mx-4 -mt-4 h-28 overflow-hidden rounded-t-2xl border-b flex items-center justify-center ${dark ? "bg-[var(--color-surface-raised)] border-[var(--color-border-light)]" : "bg-slate-50 border-slate-100"}`}>
+        {board.thumbnail
+          ? <img src={board.thumbnail} alt="" loading="lazy" className="w-full h-full object-contain" />
+          : <Icon className="w-8 h-8 opacity-25" />}
+      </div>
       <div className="flex items-start gap-2">
         <div className={`p-1.5 rounded-md ${accent}`}>
           <Icon className="w-4 h-4" />
         </div>
         <div className="min-w-0 flex-1">
+          {/* Stretched link — makes the WHOLE card open the board; actions below
+              sit above it via z-10. */}
           <Link
             to={`/whiteboards/${board.id}`}
-            className={`text-sm font-bold hover:underline truncate block ${dark ? "text-slate-100" : "text-slate-800"}`}
+            className={`text-sm font-bold hover:underline truncate block after:absolute after:inset-0 after:content-[''] ${dark ? "text-slate-100" : "text-slate-800"}`}
           >
             {board.title || "Untitled whiteboard"}
           </Link>
@@ -266,16 +278,8 @@ function BoardCard({ board, dark, isAdmin, userId, onSettings, onArchive, onUnar
           {board.goal}
         </p>
       )}
-      <div className="flex items-center gap-2 mt-auto">
-        <Link
-          to={`/whiteboards/${board.id}`}
-          className={`text-xs font-semibold px-2.5 py-1 rounded-md ${
-            dark ? "bg-[var(--color-accent-light)] text-[var(--color-accent)] hover:bg-[var(--color-accent)] hover:text-white"
-                 : "bg-[var(--color-accent-light)] text-[var(--color-accent)] hover:bg-[var(--color-accent)] hover:text-white"
-          }`}
-        >
-          Open
-        </Link>
+      {showActions && (
+      <div className="relative z-10 flex items-center gap-2 mt-auto cursor-default">
         {canManage && !board.shared && !archived && (
           <button
             type="button"
@@ -287,7 +291,7 @@ function BoardCard({ board, dark, isAdmin, userId, onSettings, onArchive, onUnar
           </button>
         )}
         {(isAdmin || isOwner) && !board.shared && (
-          <div className="ml-auto flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          <div className="ml-auto flex gap-1 opacity-100 pointer-events-auto sm:opacity-0 sm:pointer-events-none sm:group-hover:opacity-100 sm:group-hover:pointer-events-auto transition-opacity">
             {archived ? (
               <button
                 type="button"
@@ -318,6 +322,7 @@ function BoardCard({ board, dark, isAdmin, userId, onSettings, onArchive, onUnar
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }

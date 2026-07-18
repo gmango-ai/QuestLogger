@@ -72,6 +72,7 @@ import {
   setWhiteboardGoal,
   setWhiteboardTitle,
   archiveWhiteboard,
+  saveWhiteboardThumbnail,
   TEMPLATES,
 } from "../lib/whiteboard";
 import {
@@ -1392,11 +1393,15 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
   // behavior-neutral.
 
   // ── board persistence: load/seed + debounced save + flush + font-load ──
+  // onSaved fires after a real persisted change; routed through a ref because the
+  // thumbnail generator is defined later in this component (avoids a TDZ ref).
+  const scheduleThumbnailRef = useRef(null);
   useWhiteboardPersistence({
     boardId, embedded, rf,
     nodes, edges, setNodes, setEdges,
     board, setBoard, loading, setLoading, setError, setSaveState,
     setTitleDraft, setGoalDraft, readOnly,
+    onSaved: () => scheduleThumbnailRef.current?.(),
   });
 
   // ── handlers ──
@@ -2554,6 +2559,49 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
   const handleExportPng = useCallback(() => {
     exportPng(getNodesBounds(rf.getNodes()), 48);
   }, [exportPng, rf]);
+
+  // ── Preview thumbnail: a small JPEG of the whole board, regenerated ~5s after
+  // edits settle (only after a real save). Best-effort — never blocks or errors
+  // the board; skipped for read-only viewers and embedded room tiles.
+  const thumbTimerRef = useRef(null);
+  const generateThumbnail = useCallback(async () => {
+    if (readOnly || embedded || !board?.id) return;
+    // A non-owner viewing a public board has an editable-looking (but RLS
+    // no-op) canvas — never let it try to overwrite the owner's thumbnail
+    // (the update would be denied anyway; skip the wasted capture + write).
+    if (board.scope === "public" && board.owner_id !== session?.user?.id) return;
+    const el = mainRef.current?.querySelector(".react-flow__viewport");
+    if (!el) return;
+    const bounds = getNodesBounds(rf.getNodes());
+    if (!bounds || !bounds.width || !bounds.height) return;
+    const pad = 24;
+    const zoom = Math.min(1, 320 / Math.max(bounds.width, bounds.height));
+    const w = Math.ceil(bounds.width * zoom + pad * 2);
+    const h = Math.ceil(bounds.height * zoom + pad * 2);
+    try {
+      const { toJpeg } = await import("html-to-image");
+      const dataUrl = await toJpeg(el, {
+        backgroundColor: dark ? "#0f172a" : "#fbf6ee",
+        width: w, height: h, pixelRatio: 1, cacheBust: true, quality: 0.7,
+        style: {
+          width: `${w}px`, height: `${h}px`,
+          transform: `translate(${pad - bounds.x * zoom}px, ${pad - bounds.y * zoom}px) scale(${zoom})`,
+        },
+      });
+      // Guard against a pathologically dense board bloating the row (and every
+      // list query that pulls thumbnails). ~120KB of data URL is plenty for a
+      // 320px preview; skip the write past that and keep the icon fallback.
+      if (dataUrl.length > 120_000) return;
+      await saveWhiteboardThumbnail(board.id, dataUrl);
+      setBoard((b) => (b ? { ...b, thumbnail: dataUrl } : b));
+    } catch { /* best-effort */ }
+  }, [readOnly, embedded, board?.id, board?.scope, board?.owner_id, session?.user?.id, rf, dark]);
+  const scheduleThumbnail = useCallback(() => {
+    clearTimeout(thumbTimerRef.current);
+    thumbTimerRef.current = setTimeout(() => { generateThumbnail(); }, 5000);
+  }, [generateThumbnail]);
+  useEffect(() => { scheduleThumbnailRef.current = scheduleThumbnail; }, [scheduleThumbnail]);
+  useEffect(() => () => clearTimeout(thumbTimerRef.current), []);
 
   const template = useMemo(
     () => (board?.template_key ? TEMPLATES[board.template_key] : null),

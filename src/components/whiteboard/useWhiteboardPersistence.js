@@ -20,7 +20,7 @@ export function useWhiteboardPersistence({
   boardId, embedded, rf,
   nodes, edges, setNodes, setEdges,
   board, setBoard, loading, setLoading, setError, setSaveState,
-  setTitleDraft, setGoalDraft, readOnly = false,
+  setTitleDraft, setGoalDraft, readOnly = false, onSaved,
 }) {
   const lastSavedRef = useRef("");
   const saveTimerRef = useRef(null);
@@ -115,6 +115,7 @@ export function useWhiteboardPersistence({
       }
       lastSavedRef.current = serialized;
       setSaveState("saved");
+      onSaved?.(); // a real change landed → let the editor refresh the thumbnail
     }, SAVE_DEBOUNCE_MS);
     return () => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
