@@ -179,12 +179,17 @@ function PortalStage({ layoutMode = "grid", followSpeaker = true }) {
   // The kiosk publishes the room's mic, so its own mic keeps it in the active-
   // speaker list (room noise + the call audio echoing back through the speakers).
   // Left in, that made the spotlight snap to the kiosk's OWN camera the instant a
-  // remote speaker paused — defeating the decay. Exclude the device itself so the
-  // decay can actually hold the last remote speaker's face through a pause.
+  // remote speaker paused. Exclude the device itself so a surfaced/featured speaker
+  // is always a real remote person.
   const localId = localParticipant?.identity;
   const remoteSpeaking = speaking.filter((p) => p.identity !== localId);
-  // A touch longer than the member call since the kiosk is a passive display.
-  const featuredId = useFeaturedSpeaker(remoteSpeaking, { decayMs: 3500 });
+  // HOLD the last remote speaker (matches the member call) — never release on
+  // silence. The grid keeps its stable order and the ONLY movement is an
+  // off-screen speaker surfacing into one quiet slot; a surfaced person then holds
+  // that slot until another off-screen person speaks. (Previously a 3.5s decay
+  // paged the surfaced speaker back out on its own — movement the grid shouldn't
+  // make unprompted.)
+  const featuredId = useFeaturedSpeaker(remoteSpeaking, { hold: true });
 
   // Focus priority: an admin's global pin > a screen share > the featured remote
   // speaker > the first REMOTE camera (prefer a person over the empty-room shot)
