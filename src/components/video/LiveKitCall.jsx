@@ -32,9 +32,10 @@ import { LIVEKIT_URL, fetchLiveKitToken, liveKitRoomName } from "../../lib/livek
 import { kickFromCall, muteParticipantTrack, setRoomPin, clearRoomPin } from "../../lib/livekitModerate";
 import { useRoomCluster, useClusterRoles, ATTR_ROOM_DEVICE } from "./useRoomCluster";
 import { PREF, loadPref, savePref } from "./callPrefs";
-import { LK_ROOM_OPTIONS, LK_CONNECT_OPTIONS, connectDelayFor, markConnectAttempt, connectCooldownMs, noteConnectFailure } from "./livekitConnect";
+import { getLkRoomOptions, LK_CONNECT_OPTIONS, connectDelayFor, markConnectAttempt, connectCooldownMs, noteConnectFailure } from "./livekitConnect";
 import { diagReset, diagRecord, diagReport, diagEnv, logAudioEvent } from "./livekitDiagnostics";
 import { useFullscreen } from "./useFullscreen";
+import AudioUnblocker from "./AudioUnblocker";
 import { useGlobalPin } from "./useGlobalPin";
 import { useDriveBridge } from "./useDriveBridge";
 import { useDeviceRotation } from "./useDeviceRotation";
@@ -180,13 +181,36 @@ function bgToOptions(bg, customBg) {
 //   float  — render your own tile as a draggable PiP instead of a grid cell
 const SelfViewContext = createContext({ mirror: true, float: true, fit: "cover", selfRotate: 0, setMirror: () => {}, setFloat: () => {} });
 
+// ONE room-cluster subscription for the whole call. useRoomCluster derives the
+// same roles from the same participant attributes wherever it's called, so the
+// call used to mount ~7 independent copies — each with its own attribute + connect
+// listeners and its own re-render churn. This provider runs it exactly once (with
+// manage:true, folding in the old RoomClusterManager's leader-handoff side effect)
+// and shares the result; every consumer reads it via useCluster(). One source of
+// truth, one subscription.
+const RoomClusterContext = createContext(null);
+
+function RoomClusterProvider({ children }) {
+  const cluster = useRoomCluster({ manage: true });
+  return <RoomClusterContext.Provider value={cluster}>{children}</RoomClusterContext.Provider>;
+}
+
+// Cluster state/actions from the single provider. Context-only (no fallback
+// subscription) so it doesn't reintroduce a per-consumer subscription — every
+// call site lives inside <RoomClusterProvider>.
+function useCluster() {
+  const ctx = useContext(RoomClusterContext);
+  if (!ctx) throw new Error("useCluster must be used within <RoomClusterProvider>");
+  return ctx;
+}
+
 const RoomEntryHoldContext = createContext({
   entryHoldPending: false,
   beginEntryHold: () => {},
 });
 
 function RoomEntryHoldProvider({ children }) {
-  const { cluster } = useRoomCluster();
+  const { cluster } = useCluster();
   const [entryHoldPending, setEntryHoldPending] = useState(false);
 
   useEffect(() => {
@@ -345,7 +369,7 @@ function useHandRaiseValue() {
 function PublishController({ publish, choices, micMuted }) {
   const { localParticipant } = useLocalParticipant();
   const room = useRoomContext();
-  const { cluster, isMicSource, micSourceId, existingCluster, mergeTarget, startRoom, joinRoom } = useRoomCluster();
+  const { cluster, isMicSource, micSourceId, existingCluster, mergeTarget, startRoom, joinRoom } = useCluster();
   const { entryHoldPending } = useRoomEntryHold();
   const bestMicAppliedRef = useRef(false);
   const enteredRef = useRef(false);
@@ -401,8 +425,9 @@ function PublishController({ publish, choices, micMuted }) {
       localParticipant.setAttributes({ role: publish ? "publisher" : "spectator" }).catch(() => { /* */ });
     };
     room.on(RoomEvent.Connected, applyRole);
+    room.on(RoomEvent.Reconnected, applyRole);
     if (room.state === "connected") applyRole();
-    return () => room.off(RoomEvent.Connected, applyRole);
+    return () => { room.off(RoomEvent.Connected, applyRole); room.off(RoomEvent.Reconnected, applyRole); };
   }, [localParticipant, room, publish]);
 
   // Camera — join choices + connect/reconnect only. In-call camera toggles
@@ -418,8 +443,9 @@ function PublishController({ publish, choices, micMuted }) {
         .catch(() => { /* device denied/unavailable — stay subscribe-only */ });
     };
     room.on(RoomEvent.Connected, applyCamera);
+    room.on(RoomEvent.Reconnected, applyCamera);
     if (room.state === "connected") applyCamera();
-    return () => room.off(RoomEvent.Connected, applyCamera);
+    return () => { room.off(RoomEvent.Connected, applyCamera); room.off(RoomEvent.Reconnected, applyCamera); };
   }, [localParticipant, room, publish, choices?.videoEnabled, choices?.videoDeviceId]);
 
   // Mic gating — re-applied on connect AND whenever the room-audio cluster state
@@ -451,8 +477,9 @@ function PublishController({ publish, choices, micMuted }) {
         .catch(() => { /* */ });
     };
     room.on(RoomEvent.Connected, applyMic);
+    room.on(RoomEvent.Reconnected, applyMic);
     if (room.state === "connected") applyMic();
-    return () => room.off(RoomEvent.Connected, applyMic);
+    return () => { room.off(RoomEvent.Connected, applyMic); room.off(RoomEvent.Reconnected, applyMic); };
   }, [localParticipant, room, publish, micMuted, cluster, isMicSource, inRoom, choices?.audioDeviceId, entryHoldPending]);
 
   // Hard follower mic-lock — the backstop for "my mic played through the room".
@@ -515,12 +542,8 @@ function PublishController({ publish, choices, micMuted }) {
   return null;
 }
 
-// Manages the in-room cluster: leader handoff when the room speaker drops.
-// Mounted exactly once (it owns the `manage` side-effects); renders nothing.
-function RoomClusterManager() {
-  useRoomCluster({ manage: true });
-  return null;
-}
+// (Removed) RoomClusterManager's manage:true leader-handoff side effect now runs
+// inside RoomClusterProvider, which owns the single cluster subscription.
 
 // Re-applies the saved audio-output device (chosen in a prior call or the lobby)
 // once connected, so your speaker choice persists across calls. switchActiveDevice
@@ -535,7 +558,11 @@ function SavedSpeakerApplier() {
     };
     if (room.state === "connected") apply();
     room.on(RoomEvent.Connected, apply);
-    return () => { room.off(RoomEvent.Connected, apply); };
+    // Re-apply after a full reconnect too — a reconnect fires Reconnected (not
+    // Connected), and LiveKit doesn't restore a non-default output sink itself,
+    // so audio would otherwise come back on the wrong speaker.
+    room.on(RoomEvent.Reconnected, apply);
+    return () => { room.off(RoomEvent.Connected, apply); room.off(RoomEvent.Reconnected, apply); };
   }, [room]);
   return null;
 }
@@ -614,7 +641,7 @@ function ConnectionDiagnostics({ roomId }) {
 // best-effort on speakers (an in-room mic also hears the room speaker, which no
 // per-device echo-cancel can remove). Thresholds will want real-world tuning.
 function AutoMicController({ enabled }) {
-  const cl = useRoomCluster();
+  const cl = useCluster();
   const hasDevice = cl.members.some((p) => p.attributes?.[ATTR_ROOM_DEVICE] === "1");
   const active = enabled && !!cl.cluster && hasDevice;
   // Keep the latest claim/release in a ref so the detector isn't torn down and
@@ -646,52 +673,50 @@ function AutoMicController({ enabled }) {
   return null;
 }
 
-// Audio playback. In a room only the AUDIO SINK (the device's speakers, or the
-// lone speaker in a device-less room) plays the call aloud — anyone else in the
-// room would double up and echo. Solo participants render normally.
-function ClusterAudioRenderer({ holdForEntry = false }) {
-  const { cluster, isAudioSink } = useRoomCluster();
+// Remote-audio playback. ALWAYS mounted so the underlying Web-Audio mix (see
+// getLkRoomOptions' webAudioMix) is never torn down and rebuilt — a rebuilt
+// renderer can land autoplay-blocked with no gesture to recover it, which is how
+// deafen/undeafen and follower flips used to go silent. Every reason to be quiet
+// is now expressed through the SINGLE `muted` prop instead of unmounting:
+//   • a spectator who isn't listening (!publish && !listen),
+//   • deafen,
+//   • an in-room FOLLOWER (in a cluster but not its audio sink): the room speaker
+//     carries the call for them, so muting prevents an echo. `muted` maps to
+//     LiveKit's per-track setEnabled — the server stops sending, saving their
+//     bandwidth — so this ALSO replaces the old, separate FollowerAudioGate
+//     unsubscribe (one gate now, not two that could diverge), and
+//   • the pre-cluster entry hold, so our speakers can't feed a co-located mic
+//     before the follower/sink role resolves.
+function ClusterAudioRenderer({ publish = true, listen = true, deafened = false, holdForEntry = false }) {
+  const { cluster, isAudioSink } = useCluster();
   const { entryHoldPending } = useRoomEntryHold();
-  // holdForEntry: while joining "in this room" but before the cluster attribute
-  // has landed, stay silent so our speakers can't feed a co-located mic. Only
-  // hold WHILE still entering — once we've been in a cluster, leaving it must
-  // restore the call audio. Manual re-entry re-arms the hold until clustering lands.
-  const enteredRef = useRef(false);
-  if (cluster) enteredRef.current = true;
-  const hold = entryHoldPending || (holdForEntry && !enteredRef.current);
-  if ((cluster && !isAudioSink) || (hold && !cluster)) return null;
-  return <RoomAudioRenderer />;
+  // Sticky "we've clustered at least once this call" — a follower who then leaves
+  // the room must hear again. Tracked in an effect (not mutated during render) so
+  // a concurrent re-render can't latch the hold-release early.
+  const [entered, setEntered] = useState(false);
+  useEffect(() => { if (cluster) setEntered(true); }, [cluster]);
+  // Fail OPEN: if the entry hold is armed but a cluster never lands (a slow or
+  // failed connect, an attribute write that got dropped), release the hold after
+  // a few seconds so a listener is NEVER left permanently silent. Hearing a beat
+  // early is a far better failure than a call that stays dead.
+  useEffect(() => {
+    if (!holdForEntry || entered) return undefined;
+    const t = setTimeout(() => setEntered(true), 6000);
+    return () => clearTimeout(t);
+  }, [holdForEntry, entered]);
+  const hold = entryHoldPending || (holdForEntry && !entered);
+  const isFollower = (!!cluster && !isAudioSink) || (hold && !cluster);
+  const shouldHear = (publish || listen) && !deafened && !isFollower;
+  return <RoomAudioRenderer muted={!shouldHear} />;
 }
 
-// Stops audio from even being *sent* to in-room participants who aren't the
-// sink. They hear the call through the room speaker in person, so they need no
-// audio on their own device. Unsubscribing (vs just not playing) means the SFU
-// stops delivering those streams here at all — matching "in-room people only
-// need external audio, via the room speaker". This also covers a person who
-// took over the mic: they publish, but the device still plays for the room, so
-// they don't subscribe either. Re-subscribes the moment they become the sink.
-function FollowerAudioGate({ holdForEntry = false }) {
-  const { cluster, isAudioSink } = useRoomCluster();
-  const { entryHoldPending } = useRoomEntryHold();
-  // Release the entry hold once we've actually clustered (see ClusterAudioRenderer)
-  // so leaving the room re-subscribes us; manual re-entry re-arms it.
-  const enteredRef = useRef(false);
-  if (cluster) enteredRef.current = true;
-  const hold = entryHoldPending || (holdForEntry && !enteredRef.current);
-  const suppress = (!!cluster && !isAudioSink) || (hold && !cluster);
-  const audioTracks = useTracks(
-    [Track.Source.Microphone, Track.Source.ScreenShareAudio],
-    { onlySubscribed: false },
-  );
-  useEffect(() => {
-    audioTracks.forEach((tr) => {
-      const pub = tr.publication;
-      if (!pub || tr.participant?.isLocal || typeof pub.setSubscribed !== "function") return;
-      pub.setSubscribed(!suppress);
-    });
-  }, [suppress, audioTracks]);
-  return null;
-}
+// (Removed) FollowerAudioGate previously unsubscribed remote mic + screen-share
+// audio at the SFU for in-room followers, a SECOND suppression path alongside
+// ClusterAudioRenderer that could diverge from it and whose re-subscribe latency
+// was a prime "audio cut out" cause. That behaviour is now folded into the single
+// `muted` gate in ClusterAudioRenderer above: `muted` maps to per-track
+// setEnabled, so the server likewise stops sending a follower's audio (same
+// bandwidth saving) with no separate, divergeable subscription state to manage.
 
 // Applies the self-view processors to the LOCAL tracks: our refined background
 // pipeline on the camera (refinedBackground.js — MediaPipe + WebGL edge refine)
@@ -963,7 +988,7 @@ function RoomClusterButton({ autoMic, onToggleAutoMic }) {
   const {
     cluster, members, isMicSource, isAudioSink, existingCluster,
     startRoom, joinRoom, takeSpeaker, stepDown, takeSink, releaseSink, leaveRoom,
-  } = useRoomCluster();
+  } = useCluster();
   const { beginEntryHold } = useRoomEntryHold();
   const roles = useClusterRoles();
   const [open, setOpen] = useState(false);
@@ -1121,7 +1146,7 @@ function RoomClusterButton({ autoMic, onToggleAutoMic }) {
 // transmitting. So: MicOff = you muted yourself; Mic + "In room" badge = the
 // room is carrying you.
 function MicButton({ micMuted, deafened, onToggleMic }) {
-  const { cluster, isMicSource } = useRoomCluster();
+  const { cluster, isMicSource } = useCluster();
   const carriedByRoom = !!cluster && !isMicSource;
   const title = deafened
     ? "Undeafen before unmuting"
@@ -1391,7 +1416,15 @@ function CallControlBar({
               <SettingRow icon={RotateCw} label="Auto-rotate my video" active={autoRotateEnabled} onClick={onToggleAutoRotate} />
             </DeviceSettingsMenu>
           )}
-          <TrackToggle source={Track.Source.ScreenShare} />
+          {/* Share the screen WITH its audio (a shared video/music tab was silent
+              before — the SDK defaults screen-share audio off). The receive side
+              already subscribes to ScreenShareAudio and the always-on renderer
+              plays it. systemAudio/selfBrowserSurface let Chromium offer tab +
+              system audio and current-tab capture. */}
+          <TrackToggle
+            source={Track.Source.ScreenShare}
+            captureOptions={{ audio: true, systemAudio: "include", selfBrowserSurface: "include" }}
+          />
           {/* In-room companion mode: become the room speaker / join muted. */}
           <RoomClusterButton autoMic={autoMic} onToggleAutoMic={onToggleAutoMic} />
         </>
@@ -2674,6 +2707,9 @@ function ConferenceLayout({ compact, publish, onJoinIn, emote, roomId, micMuted,
     >
       <EffectsController bg={bg} customBg={customBg} noiseEnabled={noiseEnabled} />
       <AutoMicController enabled={autoMic} />
+      {/* Autoplay-recovery affordance — only visible when the browser has blocked
+          remote-audio playback (fresh PiP document, backgrounded tab, iOS). */}
+      <AudioUnblocker />
       {/* Recording indicator — shown to EVERY participant (the consent surface),
           plus a one-time notice when it starts. */}
       {(rec.isActive || rec.isProcessing || recNotice) && (
@@ -2891,7 +2927,7 @@ export default function LiveKitCall({ roomId, displayName, compact, publish = tr
         audio={false}
         // Capped-backoff reconnect + bounded initial retries so a failed
         // connect can't 429-storm LiveKit Cloud across every region.
-        options={LK_ROOM_OPTIONS}
+        options={getLkRoomOptions()}
         connectOptions={LK_CONNECT_OPTIONS}
         style={{ height: "100%" }}
         onConnected={() => {
@@ -2929,28 +2965,31 @@ export default function LiveKitCall({ roomId, displayName, compact, publish = tr
           onError?.(msg);
         }}
       >
+        <RoomClusterProvider>
         <RoomEntryHoldProvider>
           <PublishController publish={publish} choices={choices} micMuted={micMuted} />
           {/* Silent connection-health recorder — feeds the disconnect report so a
               force disconnect can be explained, not just observed. */}
           <ConnectionDiagnostics roomId={roomId} />
           <ConferenceLayout compact={compact} publish={publish} onJoinIn={onJoinIn} emote={emote} roomId={roomId} micMuted={micMuted} onToggleMic={toggleMic} deafened={deafened} onToggleDeafen={toggleDeafen} chromeless={chromeless} hideControls={hideControls} />
-          {/* Owns in-room cluster management (leader handoff). Mount once. */}
-          <RoomClusterManager />
+          {/* (Cluster management/leader-handoff runs in RoomClusterProvider now.) */}
           {/* Restore the saved audio-output device on connect. */}
           <SavedSpeakerApplier />
-          {/* In-room followers receive no audio at all (the room speaker carries
-              it for them); everyone else plays normally. holdForEntry keeps a
-              still-clustering "in this room" joiner silent during the entry window. */}
-          <FollowerAudioGate holdForEntry={publish && !!choices?.inRoom} />
-          {/* Required for participants to be audible — suppressed for in-room
-              followers so the leader's speakers don't echo back through them. Also
-              gated on `listen`: a silent auto-preview spectator plays NOTHING, so
-              walking up to a room can't blast the call through your speakers and
-              (if a live participant is nearby) feed back into the room. Publishers
-              always hear; explicit watchers and join always have listen=true. */}
-          {(publish || listen) && !deafened && <ClusterAudioRenderer holdForEntry={publish && !!choices?.inRoom} />}
+          {/* The ONE remote-audio renderer. Always mounted (never unmounted) so
+              its Web-Audio mix is never torn down and rebuilt autoplay-blocked;
+              every reason to be quiet — a non-listening spectator, deafen, an
+              in-room follower (the room speaker carries the call, so muting avoids
+              echo AND stops the server sending), and the pre-cluster entry hold —
+              is folded into its single `muted` prop. holdForEntry keeps a
+              still-clustering "in this room" joiner muted during the entry window. */}
+          <ClusterAudioRenderer
+            publish={publish}
+            listen={listen}
+            deafened={deafened}
+            holdForEntry={publish && !!choices?.inRoom}
+          />
         </RoomEntryHoldProvider>
+        </RoomClusterProvider>
       </LiveKitRoom>
     </div>
   );

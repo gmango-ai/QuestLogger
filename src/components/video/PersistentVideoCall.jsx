@@ -7,6 +7,7 @@ import { useSyncSession } from "../../context/SyncSessionContext";
 import { useTheme } from "../../context/ThemeContext";
 import { cloneDocStyles, copyRootCustomProps } from "../pomodoro/PomodoroPipParts";
 import { audioMediaSnapshot, logAudioEvent } from "./livekitDiagnostics";
+import { getAudioContext } from "../../lib/audioContext";
 import VideoCall from "./VideoCall";
 
 // Re-parenting the call host — between the page stage, the floating PiP, and the
@@ -18,6 +19,10 @@ import VideoCall from "./VideoCall";
 // call is visible in the console.
 function resumeHostMedia(host, where) {
   if (!host) return;
+  // With webAudioMix the remote call audio flows through the shared AudioContext,
+  // not the moved <audio> elements — so resume that context too (it can be parked
+  // in "suspended" after a background/re-parent). getAudioContext() resumes it.
+  getAudioContext();
   const before = audioMediaSnapshot(host);
   try {
     host.querySelectorAll("video, audio").forEach((el) => {
@@ -100,6 +105,32 @@ export default function PersistentVideoCall() {
     const ro = new ResizeObserver(() => setSmall(host.clientWidth > 0 && host.clientWidth < 380));
     ro.observe(host);
     return () => ro.disconnect();
+  }, []);
+
+  // Continuous resume backstop: resumeHostMedia() only nudges elements present at
+  // re-parent time, so a <video>/<audio> the call adds LATER (a participant joins,
+  // unmutes, or undeafens) while the host lives in a floating/PiP/pop-out slot
+  // would stay paused. Watch the host for added media and resume it. With
+  // webAudioMix the remote audio no longer depends on these elements playing, so
+  // this is mainly for video tiles + belt-and-suspenders, but it closes the gap.
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host || typeof MutationObserver === "undefined") return undefined;
+    const resume = (el) => {
+      const p = el.play?.();
+      if (p && typeof p.catch === "function") p.catch(() => {});
+    };
+    const mo = new MutationObserver((records) => {
+      for (const rec of records) {
+        rec.addedNodes.forEach((node) => {
+          if (!(node instanceof HTMLElement)) return;
+          if (node.tagName === "VIDEO" || node.tagName === "AUDIO") resume(node);
+          else node.querySelectorAll?.("video, audio").forEach(resume);
+        });
+      }
+    });
+    mo.observe(host, { childList: true, subtree: true });
+    return () => mo.disconnect();
   }, []);
   const compact = inPiP || small;
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useReducer } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import { useLocalParticipant, useParticipants, useRoomContext } from "@livekit/components-react";
 import { RoomEvent } from "livekit-client";
 
@@ -37,6 +37,7 @@ export const ATTR_LEADER = "clusterLeaderId";
 export const ATTR_OVERRIDE = "speakerOverride";
 export const ATTR_ROOM_DEVICE = "roomDevice";
 export const ATTR_SINK = "clusterSink"; // self-claim for the speakers (audio sink) role
+export const ATTR_SINK_OFF = "clusterSinkOff"; // "1" = opted OUT of being the sink (e.g. room device with Sound off) — never pick it
 
 // Who carries the room's mic, from a cluster's members. Pure.
 // Priority: a deliberate manual take-over (sticky) > the most-recent voice-
@@ -72,17 +73,31 @@ export function pickMicSource(members) {
 }
 
 // The sink (speakers): a person who took over the room's speakers wins, else the
-// room device, else the mic source. Lets a laptop be the room's speakers while
-// the device (or someone else) stays the mic. Pure.
+// room device, else the mic source, else — critically — ANY remaining member, so
+// a cluster is NEVER left with no sink (which muted the whole room into silence).
+// Lets a laptop be the room's speakers while the device (or someone else) stays
+// the mic. Pure.
+//
+// A member marked ATTR_SINK_OFF ("1") has opted out of playing — the room device
+// with its Sound turned off, most importantly — and is skipped at every tier so
+// the sink falls through to a human whose speakers can carry the room instead of
+// everyone going silent.
 export function pickAudioSink(members, micSourceId) {
+  const plays = (p) => p.attributes?.[ATTR_SINK_OFF] !== "1";
   const claimed = members
-    .filter((p) => p.attributes?.[ATTR_SINK] === p.identity && p.attributes?.[ATTR_ROOM_DEVICE] !== "1")
+    .filter((p) => p.attributes?.[ATTR_SINK] === p.identity && p.attributes?.[ATTR_ROOM_DEVICE] !== "1" && plays(p))
     .map((p) => p.identity)
     .sort();
   if (claimed.length) return claimed[0];
-  const device = members.find((p) => p.attributes?.[ATTR_ROOM_DEVICE] === "1");
+  const device = members.find((p) => p.attributes?.[ATTR_ROOM_DEVICE] === "1" && plays(p));
   if (device) return device.identity;
-  return micSourceId;
+  // No device (or it's muted): the mic source's speakers carry the room. If the
+  // mic source opted out or there is none, fall back to the lowest-id member that
+  // still plays — SOMEONE must be the sink so a device-less room / a room whose
+  // leader just left is never left silent.
+  const eligible = members.filter(plays).map((p) => p.identity).sort();
+  if (micSourceId && eligible.includes(micSourceId)) return micSourceId;
+  return eligible[0] || micSourceId || null;
 }
 
 // identity -> { inRoom, isMicSource, isAudioSink, isDevice } for ALL clusters in
@@ -140,6 +155,29 @@ export function useRoomCluster({ manage = false } = {}) {
     };
   }, [room]);
 
+  // Attribute writes issued BEFORE the room finishes connecting are silently
+  // dropped by the SDK (setAttributes is a no-op until connected). That was the
+  // root of a permanent-silence bug: the pre-join "found the room" write fired on
+  // a 900ms timer that could beat the connection, so the cluster attribute never
+  // landed and the joiner stayed muted forever. Queue any pre-connect write and
+  // flush it on (re)connect so founding/joining always takes effect.
+  const pendingAttrsRef = useRef(null);
+  useEffect(() => {
+    if (!room || !localParticipant) return undefined;
+    const flush = () => {
+      const delta = pendingAttrsRef.current;
+      pendingAttrsRef.current = null;
+      if (delta) localParticipant.setAttributes(delta).catch(() => {});
+    };
+    room.on(RoomEvent.Connected, flush);
+    room.on(RoomEvent.Reconnected, flush);
+    if (room.state === "connected") flush();
+    return () => {
+      room.off(RoomEvent.Connected, flush);
+      room.off(RoomEvent.Reconnected, flush);
+    };
+  }, [room, localParticipant]);
+
   const myId = localParticipant?.identity || null;
   const myAttrs = localParticipant?.attributes || {};
   const cluster = myAttrs[ATTR_CLUSTER] || null;
@@ -196,12 +234,18 @@ export function useRoomCluster({ manage = false } = {}) {
   }, [participants, cluster, myId, members]);
 
   const setAttrs = useCallback(
-    // setAttributes is a signal request — a no-op (and a "cannot send signal
-    // request before connected" warning) until the room is connected.
-    (delta) =>
-      localParticipant && room?.state === "connected"
-        ? localParticipant.setAttributes(delta).catch(() => {})
-        : Promise.resolve(),
+    (delta) => {
+      // setAttributes is a signal request — a no-op (and a "cannot send signal
+      // request before connected" warning) until the room is connected. When
+      // called too early, merge the delta into a pending write that the flush
+      // effect above sends on Connected/Reconnected, so a founding/join write is
+      // never lost to a slow connect.
+      if (localParticipant && room?.state === "connected") {
+        return localParticipant.setAttributes(delta).catch(() => {});
+      }
+      pendingAttrsRef.current = { ...(pendingAttrsRef.current || {}), ...delta };
+      return Promise.resolve();
+    },
     [localParticipant, room],
   );
 
