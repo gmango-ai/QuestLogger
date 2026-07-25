@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { logCallEvent } from "../components/video/livekitDiagnostics";
 
 // Owns the *one* active LiveKit room call across the whole app session.
@@ -20,8 +20,45 @@ import { logCallEvent } from "../components/video/livekitDiagnostics";
 
 const VideoCallContext = createContext(null);
 
+// ── Active-call persistence (auto-rejoin) ────────────────────────────────────
+// The provider lives inside the authenticated tree, so it remounts when auth is
+// lost then regained (e.g. a re-login in the same tab after an auth-server
+// wobble). We stash the active call in sessionStorage so that remount can rejoin
+// automatically instead of stranding the user. Only a real teardown (endCall) or
+// closing the tab clears it — a bare unmount (the logout path) leaves it intact.
+const ACTIVE_CALL_KEY = "ql_active_call";
+const RESTORE_MAX_AGE_MS = 30 * 60 * 1000; // don't rejoin a stale/abandoned call
+
+function persistActiveCall(c) {
+  try {
+    if (!c?.roomId) return;
+    sessionStorage.setItem(ACTIVE_CALL_KEY, JSON.stringify({
+      roomId: c.roomId,
+      displayName: c.displayName || "",
+      mode: c.mode || "join",
+      listen: c.listen !== false,
+      ts: Date.now(),
+    }));
+  } catch { /* private mode / storage disabled — auto-rejoin just won't fire */ }
+}
+function clearPersistedActiveCall() {
+  try { sessionStorage.removeItem(ACTIVE_CALL_KEY); } catch { /* */ }
+}
+function loadPersistedActiveCall() {
+  try {
+    const raw = sessionStorage.getItem(ACTIVE_CALL_KEY);
+    if (!raw) return null;
+    const s = JSON.parse(raw);
+    if (!s?.roomId || Date.now() - (s.ts || 0) > RESTORE_MAX_AGE_MS) return null;
+    // Device choices aren't persisted; rejoin uses defaults (permissions already
+    // granted from the original join, so this reconnects without a fresh prompt).
+    return { roomId: s.roomId, displayName: s.displayName || "", mode: s.mode || "join", choices: null, listen: s.listen !== false };
+  } catch { return null; }
+}
+
 export function VideoCallProvider({ children }) {
-  const [call, setCall] = useState(null);
+  // Restore an in-flight call on mount (auto-rejoin after a recovered logout).
+  const [call, setCall] = useState(loadPersistedActiveCall);
   const [stageEl, setStageElRaw] = useState(null);
   // Pop-out (Document PiP) state. The actual window/host management lives in
   // PersistentVideoCall (it owns the re-parentable host + needs a user gesture),
@@ -46,6 +83,15 @@ export function VideoCallProvider({ children }) {
   const callRef = useRef(null);
   callRef.current = call;
 
+  // If we mounted with a restored call (auth-loss → re-login rejoin), leave a
+  // breadcrumb so the reconnect is distinguishable from a fresh user-initiated
+  // join in the call diagnostics.
+  useEffect(() => {
+    if (callRef.current) logCallEvent("restore", { roomId: callRef.current.roomId, mode: callRef.current.mode });
+    // Mount-only: this fires once for the initial (possibly restored) call.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // opts.mode: "join" (publish camera/mic) | "spectate" (subscribe-only —
   // see everyone without publishing). opts.choices: device prefs from the
   // pre-join card ({ videoEnabled, audioEnabled, videoDeviceId, audioDeviceId }).
@@ -63,13 +109,15 @@ export function VideoCallProvider({ children }) {
       from: prev?.roomId || null,
       mode: opts.mode || "join",
     });
-    setCall({
+    const next = {
       roomId,
       displayName: displayName || "",
       mode: opts.mode || "join",
       choices: opts.choices || null,
       listen: opts.listen !== false,
-    });
+    };
+    setCall(next);
+    persistActiveCall(next);
   }, []);
 
   // reason — a short string for WHY the call is ending (user leave, sync-session
@@ -78,6 +126,11 @@ export function VideoCallProvider({ children }) {
   const endCall = useCallback((reason) => {
     const prev = callRef.current;
     if (prev) logCallEvent("end", { roomId: prev.roomId, reason: reason || "unspecified" });
+    // A DELIBERATE end (user leaves, room cleared) clears the auto-rejoin marker.
+    // "livekit-disconnected" is a transient drop — and it also fires when the tree
+    // unmounts on logout — so it must NOT clear the marker, or a recovered login
+    // couldn't rejoin. (A bare unmount never calls endCall at all.)
+    if (reason !== "livekit-disconnected") clearPersistedActiveCall();
     setCall(null);
     setStageElRaw(null);
     setPoppedOut(false);
@@ -90,6 +143,8 @@ export function VideoCallProvider({ children }) {
   const updateCall = useCallback((partial) => {
     logCallEvent("update", partial);
     setCall((c) => (c ? { ...c, ...partial } : c));
+    const cur = callRef.current;
+    if (cur) persistActiveCall({ ...cur, ...partial });
   }, []);
 
   // Stable identity for the setter so RoomVideoStage's useEffect

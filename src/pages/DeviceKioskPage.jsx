@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, DoorOpen, Power, Moon, CalendarClock, Lock, LockOpen, LayoutTemplate, Trash2 } from "lucide-react";
 import { supabase } from "../supabase";
+import { markIntentionalSignOut } from "../lib/sessionRecovery";
 import { applyAccent } from "../lib/accent";
 import { playNotify, uiSoundsEnabled } from "../lib/uiSounds";
 import { currentDeviceRoom, setDeviceRoom, currentDeviceSleep, deviceSetSleep } from "../lib/orgDevices";
@@ -512,7 +513,7 @@ export default function DeviceKioskPage({ session }) {
     whiteboardId: sess?.whiteboard_id || null,
   }), [room, roomId, userId, deviceName, sess, participants, presenceById, meetings, roster, someoneInCall]);
 
-  const unpair = async () => { await supabase.auth.signOut(); };
+  const unpair = async () => { markIntentionalSignOut(); await supabase.auth.signOut(); };
 
   if (!roomId) {
     return (

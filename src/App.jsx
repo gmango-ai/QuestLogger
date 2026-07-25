@@ -1,9 +1,10 @@
-import { useState, useEffect, lazy, Suspense } from "react";
+import { useState, useEffect, useRef, lazy, Suspense } from "react";
 import { BrowserRouter, Routes, Route, useLocation, useNavigate, Navigate } from "react-router-dom";
 import { App as CapApp } from "@capacitor/app";
 import { Browser } from "@capacitor/browser";
 import { StatusBar, Style } from "@capacitor/status-bar";
 import { supabase } from "./supabase";
+import { isIntentionalSignOut, clearIntentionalSignOut, recoverSession } from "./lib/sessionRecovery";
 import { isMobileApp, getPlatform } from "./lib/platform";
 import { requestNotificationPermissions } from "./lib/nativeNotifications";
 import { addNotificationTapListener, consumePendingNotificationRoute } from "./lib/persistentTimer";
@@ -496,18 +497,52 @@ function AuthenticatedApp({ session }) {
 
 export default function App() {
   const [session, setSession] = useState(undefined);
+  // The last session we successfully held — the source of a still-valid refresh
+  // token to recover from. `recovering` guards against re-entrancy: each failed
+  // refresh attempt re-emits SIGNED_OUT, which must not kick off a second loop.
+  const lastGoodSessionRef = useRef(null);
+  const recoveringRef = useRef(false);
 
   useEffect(() => {
+    // Honor a resolved (recovered or genuinely gone) session, clearing recovery.
+    const settle = (s) => {
+      recoveringRef.current = false;
+      lastGoodSessionRef.current = s || null;
+      publishElectronAuthSession(s || null);
+      setSession(s || null);
+    };
+
     supabase.auth.getSession().then(({ data }) => {
-      const nextSession = data.session ?? null;
-      publishElectronAuthSession(nextSession);
-      setSession(nextSession);
+      settle(data.session ?? null);
     });
+
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_e, s) => {
-      publishElectronAuthSession(s);
-      setSession(s);
+      // A real session arrived (sign-in / token refresh / recovery succeeded).
+      if (s) { settle(s); return; }
+
+      // Null session. A user-initiated sign-out is honored immediately.
+      if (isIntentionalSignOut()) { clearIntentionalSignOut(); settle(null); return; }
+
+      // Unintentional SIGNED_OUT. If it fired while we're already recovering
+      // (a failed retry re-emits it), ignore — the loop is handling it.
+      if (recoveringRef.current) return;
+
+      // No prior good session to recover from → this is a genuine logged-out
+      // state (e.g. a fresh, never-signed-in load), honor it.
+      const snap = lastGoodSessionRef.current;
+      if (!snap) { settle(null); return; }
+
+      // Transient refresh failure mid-session: DON'T tear the app (and the live
+      // call) down. Keep showing the current session while we retry the refresh
+      // with the last-good token; only honor the logout if recovery truly fails.
+      recoveringRef.current = true;
+      recoverSession(snap, { isAborted: () => !recoveringRef.current }).then((res) => {
+        if (!recoveringRef.current) return; // a real session already settled us
+        if (res.ok) settle(res.session);
+        else settle(null); // genuine logout (dead token or outage past budget)
+      });
     });
     return () => subscription.unsubscribe();
   }, []);
