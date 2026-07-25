@@ -4,6 +4,7 @@ import { useApp } from "../context/AppContext";
 import { useTeam } from "../context/TeamContext";
 import { useTheme } from "../context/ThemeContext";
 import { supabase } from "../supabase";
+import { markIntentionalSignOut } from "../lib/sessionRecovery";
 import { formatDuration } from "../lib/utils";
 import { Sun, Moon, LogOut, Loader2, Timer, Users, User, Building2, Settings as SettingsIcon, Menu, X, ChevronDown, ChevronUp, HelpCircle, LayoutGrid, Video } from "lucide-react";
 import UserAvatar from "./UserAvatar";
@@ -124,6 +125,7 @@ export default function Nav({ onOpenPomodoro, onPomodoroPage }) {
   function signOut() {
     setSidebarOpen(false);
     setMoreOpen(false);
+    markIntentionalSignOut();
     supabase.auth.signOut();
   }
 
@@ -687,7 +689,7 @@ function UserMenu({ dark, settings, todayMins, hasTeamSessions, presenceDot, onT
           <button
             type="button"
             role="menuitem"
-            onClick={() => { setOpen(false); supabase.auth.signOut(); }}
+            onClick={() => { setOpen(false); markIntentionalSignOut(); supabase.auth.signOut(); }}
             className={destructive}
           >
             <LogOut className="w-4 h-4" />
