@@ -11,6 +11,7 @@ import {
 } from "@livekit/components-react";
 import { Track, RoomEvent } from "livekit-client";
 import "@livekit/components-styles";
+import AudioUnblocker from "./AudioUnblocker";
 import { Mic, MicOff, Video, VideoOff, Volume2, VolumeX, Monitor, MonitorOff, Settings, LayoutGrid, Focus, Presentation, Maximize2, Minimize2, ScanFace } from "lucide-react";
 
 // Per-device audio/camera choices persist locally (the kiosk is read-only, so no
@@ -55,8 +56,8 @@ function DeviceMediaPicker({ kind, label, storageKey }) {
   );
 }
 import { LIVEKIT_URL, fetchLiveKitToken, liveKitRoomName } from "../../lib/livekit";
-import { LK_ROOM_OPTIONS, LK_CONNECT_OPTIONS, connectDelayFor, markConnectAttempt } from "./livekitConnect";
-import { ATTR_CLUSTER, ATTR_LEADER, ATTR_ROOM_DEVICE, pickMicSource, pickAudioSink } from "./useRoomCluster";
+import { getLkRoomOptions, LK_CONNECT_OPTIONS, connectDelayFor, markConnectAttempt } from "./livekitConnect";
+import { ATTR_CLUSTER, ATTR_LEADER, ATTR_ROOM_DEVICE, ATTR_SINK_OFF, pickMicSource, pickAudioSink } from "./useRoomCluster";
 import AdaptiveStage from "./AdaptiveStage";
 import { useFeaturedSpeaker } from "./useFeaturedSpeaker";
 import { useGlobalPin } from "./useGlobalPin";
@@ -476,6 +477,15 @@ function DevicePortalInner() {
     localParticipant.setCameraEnabled(cameraOn).catch(() => {});
   }, [localParticipant, cameraOn]);
 
+  // When the operator turns the room's Sound off, mark the device as opted OUT of
+  // the sink role (ATTR_SINK_OFF) so pickAudioSink falls through to a co-located
+  // human whose speakers carry the room — instead of the device staying the sink
+  // while silent and muting the whole room. Cleared when Sound comes back on.
+  useEffect(() => {
+    if (!localParticipant) return;
+    localParticipant.setAttributes({ [ATTR_SINK_OFF]: soundOn ? "" : "1" }).catch(() => {});
+  }, [localParticipant, soundOn]);
+
   return (
     <div ref={rootRef} className="relative w-full h-full bg-slate-900">
       <DeviceClusterBeacon />
@@ -493,7 +503,11 @@ function DevicePortalInner() {
         cameraOn={cameraOn}
         onToggleCamera={() => setCameraOn((v) => !v)}
         soundOn={soundOn && isAudioSink}
-        soundOverridden={!isAudioSink}
+        // "Overridden" means ANOTHER member is the sink while we still want sound —
+        // NOT our own Sound-off (which now opts us out of the sink role via
+        // ATTR_SINK_OFF). Gating on soundOn keeps the button enabled so the
+        // operator can always turn their own sound back on.
+        soundOverridden={soundOn && !isAudioSink}
         onToggleSound={() => setSoundOn((v) => !v)}
         screenOn={screenOn}
         onToggleScreen={() => setScreenOn((v) => !v)}
@@ -507,8 +521,12 @@ function DevicePortalInner() {
       />
       {/* The device is the room's speakers by default — keep playing remote audio
           (even when someone took over the mic) unless its operator muted the
-          Sound, OR someone in the room took over the speakers. */}
-      {soundOn && isAudioSink && <RoomAudioRenderer />}
+          Sound, OR someone in the room took over the speakers. ALWAYS mounted and
+          silenced via `muted` (never unmounted) so the Web-Audio mix isn't torn
+          down and rebuilt autoplay-blocked when the operator toggles Sound. */}
+      <RoomAudioRenderer muted={!(soundOn && isAudioSink)} />
+      {/* Autoplay-recovery affordance if the browser blocked playback. */}
+      <AudioUnblocker />
     </div>
   );
 }
@@ -575,7 +593,7 @@ export default function DevicePortalCall({ roomId, displayName, active = true })
         connect
         video
         audio
-        options={LK_ROOM_OPTIONS}
+        options={getLkRoomOptions()}
         connectOptions={LK_CONNECT_OPTIONS}
         style={{ height: "100%" }}
       >

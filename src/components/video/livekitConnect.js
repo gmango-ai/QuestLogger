@@ -16,6 +16,8 @@
 // Both objects are module constants so passing them to <LiveKitRoom options=…>
 // doesn't change identity between renders (which would recreate the Room).
 
+import { getAudioContext } from "../../lib/audioContext";
+
 // Capped exponential backoff. context.retryCount starts at 0 for the first
 // retry. Return null to stop retrying — after ~6 tries (~30s of backoff) we give
 // up rather than hammer. Active calls still get robust reconnection; this only
@@ -29,11 +31,32 @@ export const LK_RECONNECT_POLICY = {
   },
 };
 
-// Stable RoomOptions carrying the policy. Pass this (not a fresh literal) to
-// <LiveKitRoom options=…> so the Room isn't recreated on every render.
-export const LK_ROOM_OPTIONS = {
-  reconnectPolicy: LK_RECONNECT_POLICY,
-};
+// Stable RoomOptions carrying the policy + Web Audio mixing. Pass the SAME
+// object (via getLkRoomOptions(), which caches) to <LiveKitRoom options=…> so
+// the Room isn't recreated on every render.
+//
+// webAudioMix mixes ALL remote audio through ONE Web Audio graph instead of a
+// per-track set of <audio> DOM elements. That is the crux of the audio
+// hardening: there are no per-track elements to pause when the call host is
+// re-parented (in-app PiP, Document-PiP pop-out, page navigation), and it is
+// LiveKit's documented remedy for autoplay-blocked playback. We route it through
+// the app's single shared AudioContext (lib/audioContext.js) so the whole app
+// stays at ONE context (well under the browser's ~6 cap) with a single resume()
+// point for autoplay recovery. Passing an OBJECT (not the boolean `true`) is
+// deliberate: LiveKit only close()s the AudioContext it manages when webAudioMix
+// is a boolean, so handing it our shared context leaves that context alive across
+// call teardown (the pomodoro/ambience chimes keep working). Falls back to the
+// boolean form if Web Audio is unavailable.
+let _roomOptions = null;
+export function getLkRoomOptions() {
+  if (_roomOptions) return _roomOptions;
+  const ctx = getAudioContext();
+  _roomOptions = {
+    reconnectPolicy: LK_RECONNECT_POLICY,
+    webAudioMix: ctx ? { audioContext: ctx } : true,
+  };
+  return _roomOptions;
+}
 
 // The initial join retries at most twice; on failure the app bounces back to the
 // green room, which is a cleaner recovery than silently retrying forever.
