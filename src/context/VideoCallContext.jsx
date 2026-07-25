@@ -50,9 +50,17 @@ function loadPersistedActiveCall() {
     if (!raw) return null;
     const s = JSON.parse(raw);
     if (!s?.roomId || Date.now() - (s.ts || 0) > RESTORE_MAX_AGE_MS) return null;
-    // Device choices aren't persisted; rejoin uses defaults (permissions already
-    // granted from the original join, so this reconnects without a fresh prompt).
-    return { roomId: s.roomId, displayName: s.displayName || "", mode: s.mode || "join", choices: null, listen: s.listen !== false };
+    // Rejoin with camera OFF + mic MUTED. An auto-restore happens without a user
+    // gesture (a reload, or a recovered login), so silently turning the camera on
+    // would be a privacy surprise. The user reconnects + hears the room (listen),
+    // then unmutes/enables when ready — Zoom-style "you're back, turn on when set".
+    return {
+      roomId: s.roomId,
+      displayName: s.displayName || "",
+      mode: s.mode || "join",
+      choices: { videoEnabled: false, audioEnabled: false },
+      listen: s.listen !== false,
+    };
   } catch { return null; }
 }
 

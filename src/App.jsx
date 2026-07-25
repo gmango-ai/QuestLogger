@@ -79,6 +79,49 @@ function publishElectronAuthSession(session) {
   window.__electronAuthBridge?.publishSession?.(toElectronAuthPayload(session));
 }
 
+// Non-blocking pill shown while a transient auth failure is being recovered.
+// Fixed, centered under the safe-area top; pointer-events: none so it never
+// intercepts taps. Theme-neutral (dark glass reads on any background).
+function ReconnectingBanner() {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      style={{
+        position: "fixed",
+        top: "calc(env(safe-area-inset-top, 0px) + 10px)",
+        left: "50%",
+        transform: "translateX(-50%)",
+        zIndex: 2147483000,
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "6px 12px",
+        borderRadius: 9999,
+        background: "rgba(15,23,42,0.92)",
+        color: "#f1f5f9",
+        font: "500 12px/1 system-ui, sans-serif",
+        boxShadow: "0 6px 20px rgba(0,0,0,.35)",
+        pointerEvents: "none",
+        maxWidth: "90vw",
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 8,
+          height: 8,
+          borderRadius: "50%",
+          background: "#fbbf24",
+          animation: "ql-recon-pulse 1s ease-in-out infinite",
+        }}
+      />
+      <span>Reconnecting…</span>
+      <style>{"@keyframes ql-recon-pulse{0%,100%{opacity:1}50%{opacity:.3}}"}</style>
+    </div>
+  );
+}
+
 // Shared placeholder shown while a lazy route chunk downloads. Dependency-
 // free skeleton page (theme-aware via the dark: variant) so the swap reads
 // as content arriving, not a blank pause.
@@ -497,6 +540,10 @@ function AuthenticatedApp({ session }) {
 
 export default function App() {
   const [session, setSession] = useState(undefined);
+  // Surfaces a subtle "Reconnecting…" pill while a transient auth failure is
+  // being recovered (the session is held stale meanwhile, so data reads may
+  // 401 — this tells the user the app is working on it, not broken).
+  const [recovering, setRecovering] = useState(false);
   // The last session we successfully held — the source of a still-valid refresh
   // token to recover from. `recovering` guards against re-entrancy: each failed
   // refresh attempt re-emits SIGNED_OUT, which must not kick off a second loop.
@@ -507,6 +554,7 @@ export default function App() {
     // Honor a resolved (recovered or genuinely gone) session, clearing recovery.
     const settle = (s) => {
       recoveringRef.current = false;
+      setRecovering(false);
       lastGoodSessionRef.current = s || null;
       publishElectronAuthSession(s || null);
       setSession(s || null);
@@ -538,6 +586,7 @@ export default function App() {
       // call) down. Keep showing the current session while we retry the refresh
       // with the last-good token; only honor the logout if recovery truly fails.
       recoveringRef.current = true;
+      setRecovering(true);
       recoverSession(snap, { isAborted: () => !recoveringRef.current }).then((res) => {
         if (!recoveringRef.current) return; // a real session already settled us
         if (res.ok) settle(res.session);
@@ -637,6 +686,7 @@ export default function App() {
 
   return (
     <ThemeProvider>
+      {recovering && <ReconnectingBanner />}
       <BrowserRouter>
         <Suspense fallback={ROUTE_FALLBACK}>
         <Routes>
