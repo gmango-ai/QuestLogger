@@ -14,7 +14,9 @@ import {
   renameTeamSound as renameTeamSoundRpc, removeTeamSound as removeTeamSoundRpc,
 } from "../lib/teamSound";
 
-const TeamContext = createContext(null);
+// Exported so a provider-less surface (e.g. the public /w/:id whiteboard viewer)
+// can supply a minimal stand-in value instead of the full TeamProvider.
+export const TeamContext = createContext(null);
 
 export function TeamProvider({ session, children }) {
   const [teams, setTeams] = useState([]);

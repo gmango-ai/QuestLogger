@@ -95,21 +95,87 @@ export async function deleteWhiteboardTemplate(id) {
 // Boards visible in the active team's list: the team's ORG boards plus the
 // caller's own PERSONAL boards (pass ownerId). RLS already enforces this; the
 // filters just narrow what we ask for.
-export async function listTeamWhiteboards(teamId, { includeArchived = false, ownerId = null } = {}) {
+//
+// With `includeShared`, also returns boards SHARED WITH me (I'm an invited
+// member) tagged `shared:true`, and annotates my own personal boards with
+// `memberCount` (so the list can badge Private vs Invite-only). Off by default
+// so other callers (e.g. the room WhiteboardPicker) are unchanged.
+const WB_COLS = "id, team_id, scope, owner_id, title, template_key, goal, created_by, created_at, updated_at, archived_at";
+// The editor's board fetch: every column the editor reads (incl. the snapshot)
+// but NOT the thumbnail data URL — the editor only WRITES the thumbnail, never
+// reads it, so pulling it on every board open is wasted bytes on the hot path.
+const WB_EDITOR_COLS = `${WB_COLS}, snapshot`;
+export async function listTeamWhiteboards(teamId, { includeArchived = false, ownerId = null, includeShared = false } = {}) {
   if (!teamId && !ownerId) return { data: [], error: null };
-  let q = supabase
-    .from("whiteboards")
-    .select("id, team_id, scope, owner_id, title, template_key, goal, created_by, created_at, updated_at, archived_at")
-    .order("updated_at", { ascending: false });
+  // Only the full list page (includeShared) needs the preview thumbnail; keep
+  // lean callers (e.g. the room WhiteboardPicker) from loading those data URLs.
+  const cols = includeShared ? `${WB_COLS}, thumbnail` : WB_COLS;
+  let q = supabase.from("whiteboards").select(cols).order("updated_at", { ascending: false });
   if (teamId && ownerId) {
-    q = q.or(`and(scope.eq.org,team_id.eq.${teamId}),and(scope.eq.personal,owner_id.eq.${ownerId})`);
+    q = q.or(`and(scope.eq.org,team_id.eq.${teamId}),and(scope.eq.personal,owner_id.eq.${ownerId}),and(scope.eq.public,owner_id.eq.${ownerId})`);
   } else if (teamId) {
     q = q.eq("scope", "org").eq("team_id", teamId);
   } else {
-    q = q.eq("scope", "personal").eq("owner_id", ownerId);
+    q = q.or(`and(scope.eq.personal,owner_id.eq.${ownerId}),and(scope.eq.public,owner_id.eq.${ownerId})`);
   }
   if (!includeArchived) q = q.is("archived_at", null);
   const { data, error } = await q;
+  if (error) return { data: [], error };
+  let boards = data || [];
+
+  if (includeShared && ownerId) {
+    // Boards shared with me (I'm a member, not the owner).
+    const { data: memRows, error: memErr } = await supabase.from("whiteboard_members").select("whiteboard_id").eq("user_id", ownerId);
+    if (memErr) console.warn("listTeamWhiteboards(shared):", memErr.message);
+    const have = new Set(boards.map((b) => b.id));
+    const memIds = [...new Set((memRows || []).map((r) => r.whiteboard_id))].filter((id) => !have.has(id));
+    if (memIds.length) {
+      let mq = supabase.from("whiteboards").select(cols).in("id", memIds).order("updated_at", { ascending: false });
+      if (!includeArchived) mq = mq.is("archived_at", null);
+      const { data: shared } = await mq;
+      boards = boards.concat((shared || []).map((b) => ({ ...b, shared: true })));
+    }
+    // Member counts for the personal boards I own → "Invite-only" vs "Private".
+    const ownedIds = boards.filter((b) => b.scope === "personal" && b.owner_id === ownerId).map((b) => b.id);
+    if (ownedIds.length) {
+      const { data: mc, error: mcErr } = await supabase.from("whiteboard_members").select("whiteboard_id").in("whiteboard_id", ownedIds);
+      if (mcErr) console.warn("listTeamWhiteboards(counts):", mcErr.message);
+      const counts = {};
+      (mc || []).forEach((r) => { counts[r.whiteboard_id] = (counts[r.whiteboard_id] || 0) + 1; });
+      boards = boards.map((b) => (counts[b.id] != null ? { ...b, memberCount: counts[b.id] } : b));
+    }
+  }
+  return { data: boards, error: null };
+}
+
+// Change a board's scope after creation (personal / org / public). Owner or org
+// admin only (server-enforced). Returns the updated row.
+export async function setWhiteboardScope(whiteboardId, scope, teamId = null) {
+  const { data, error } = await supabase.rpc("set_whiteboard_scope", {
+    p_whiteboard_id: whiteboardId,
+    p_scope: scope,
+    p_team_id: teamId,
+  });
+  return { data: Array.isArray(data) ? data[0] : data, error };
+}
+
+// ─── Invite-only sharing (owner grants specific teammates access) ──────
+export async function inviteToWhiteboard(whiteboardId, userIds) {
+  if (!whiteboardId || !userIds?.length) return { error: null };
+  const { error } = await supabase.rpc("invite_to_whiteboard", { p_whiteboard_id: whiteboardId, p_user_ids: userIds });
+  return { error };
+}
+export async function removeWhiteboardMember(whiteboardId, userId) {
+  const { error } = await supabase.rpc("remove_whiteboard_member", { p_whiteboard_id: whiteboardId, p_user_id: userId });
+  return { error };
+}
+export async function listWhiteboardMembers(whiteboardId) {
+  if (!whiteboardId) return { data: [], error: null };
+  const { data, error } = await supabase
+    .from("whiteboard_members")
+    .select("user_id, granted_at")
+    .eq("whiteboard_id", whiteboardId)
+    .order("granted_at", { ascending: true });
   return { data: data || [], error };
 }
 
@@ -117,7 +183,7 @@ export async function fetchWhiteboardById(whiteboardId) {
   if (!whiteboardId) return { data: null, error: null };
   const { data, error } = await supabase
     .from("whiteboards")
-    .select("*")
+    .select(WB_EDITOR_COLS)
     .eq("id", whiteboardId)
     .maybeSingle();
   return { data, error };
@@ -151,6 +217,14 @@ export async function createWhiteboard({ teamId, title, createdBy, snapshot, sco
 // under 200KB; complex flowcharts at a few hundred). If real-time
 // diffs land in Phase 2 we keep this as the snapshot-of-record and
 // layer ops on top.
+// Store a small preview thumbnail (JPEG data URL). Best-effort; gated by the
+// board's normal update RLS (owner/team/member).
+export async function saveWhiteboardThumbnail(whiteboardId, dataUrl) {
+  if (!whiteboardId || !dataUrl) return { error: null };
+  const { error } = await supabase.from("whiteboards").update({ thumbnail: dataUrl }).eq("id", whiteboardId);
+  return { error };
+}
+
 export async function saveSnapshot(whiteboardId, snapshot) {
   if (!whiteboardId) return { error: { message: "Missing whiteboardId." } };
   const { error } = await supabase

@@ -14,7 +14,9 @@ import {
 import { uploadUserSound, deleteCustomSound } from "../lib/customSound";
 import { emailDomain, isLikelyCompanyEvent, googleRawToCompanyCandidate } from "../lib/calendar";
 
-const AppContext = createContext(null);
+// Exported so a provider-less surface (e.g. the public /w/:id whiteboard viewer)
+// can supply a minimal stand-in value instead of the full AppProvider.
+export const AppContext = createContext(null);
 
 export function AppProvider({ session, children }) {
   // ── Data state ───────────────────────────────────────────────
@@ -1347,6 +1349,7 @@ export function AppProvider({ session, children }) {
     if ("wageMode" in patch) dbPatch.wage_mode = patch.wageMode || "hourly";
     if ("annualSalary" in patch) dbPatch.annual_salary = patch.annualSalary ?? null;
     if ("offHoursWarn" in patch) dbPatch.off_hours_warn = patch.offHoursWarn;
+    if ("shareFreebusy" in patch) dbPatch.share_freebusy_with_team = patch.shareFreebusy;
     if ("oooStart" in patch) dbPatch.ooo_start = patch.oooStart || null;
     if ("oooEnd" in patch) dbPatch.ooo_end = patch.oooEnd || null;
     if ("oooNote" in patch) dbPatch.ooo_note = patch.oooNote || null;

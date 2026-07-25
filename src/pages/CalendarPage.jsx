@@ -5,7 +5,7 @@ import dayGridPlugin from "@fullcalendar/daygrid";
 import timeGridPlugin from "@fullcalendar/timegrid";
 import listPlugin from "@fullcalendar/list";
 import interactionPlugin from "@fullcalendar/interaction";
-import { ChevronLeft, ChevronRight, ChevronDown, Plus, CalendarClock, CalendarPlus, CheckSquare, User, Users, Home, Target, Umbrella, AlertTriangle, PanelLeft, PanelRight, X, LayoutGrid, Columns3, RectangleVertical, Maximize2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, ChevronDown, Plus, CalendarClock, CalendarPlus, CheckSquare, User, Users, Home, Target, Umbrella, AlertTriangle, PanelLeft, PanelRight, X, LayoutGrid, Columns3, RectangleVertical, Maximize2, RotateCw } from "lucide-react";
 import { useApp } from "../context/AppContext";
 import { useTeam } from "../context/TeamContext";
 import { useTheme } from "../context/ThemeContext";
@@ -38,6 +38,7 @@ import { normalizeTask } from "../lib/tasks/model";
 import { setTaskStatus } from "../lib/tasks/mutations";
 import { StatusControl } from "../components/tasks/TaskControls";
 import ScheduleMeetingModal from "../components/office/ScheduleMeetingModal";
+import FindATimeModal from "../components/calendar/FindATimeModal";
 import { fetchSubtaskCounts } from "../lib/subtasks";
 import "../components/calendar/calendar-ocean.css";
 
@@ -143,6 +144,7 @@ export default function CalendarPage() {
   const [newSlot, setNewSlot] = useState(null);
   const [milestoneModal, setMilestoneModal] = useState(null);
   const [meetingModal, setMeetingModal] = useState(null);
+  const [findTime, setFindTime] = useState(false);
   const [taskEdit, setTaskEdit] = useState(null);
   const [allGoals, setAllGoals] = useState([]);
   const [myTasks, setMyTasks] = useState([]);
@@ -621,19 +623,30 @@ export default function CalendarPage() {
             <button type="button" className="cal-ocean__navbtn" aria-label="Previous" onClick={() => api()?.prev()}><ChevronLeft className="w-[18px] h-[18px]" /></button>
             <button type="button" className="cal-ocean__navbtn" aria-label="Next" onClick={() => api()?.next()}><ChevronRight className="w-[18px] h-[18px]" /></button>
             <button type="button" className="cal-ocean__today" onClick={() => api()?.today()}>Today</button>
+            {activeTeamId && (
+              <button type="button" className="cal-ocean__today" onClick={() => setFindTime(true)} title="Find a time that works for everyone">Find a time</button>
+            )}
             <span className="cal-ocean__spacer" />
-            {scope === "personal" && (
-              googleConnected ? (
+            {/* Google connection — ALWAYS present (both scopes). A token can be
+                revoked/expired server-side while the app still thinks it's
+                connected, so a Reconnect affordance is always reachable. */}
+            {googleConnected ? (
+              <>
                 <button type="button" className="cal-ocean__today" onClick={reload} title="Google Calendar connected — refresh"
                   style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                   <span style={{ width: 7, height: 7, borderRadius: 999, background: "var(--o-aqua-500)" }} /> Google
                 </button>
-              ) : (
-                <button type="button" className="cal-ocean__today" onClick={() => { if (!enabledLayers.has("google")) toggleLayer("google"); connectGoogle(); }} title="Connect Google Calendar"
+                <button type="button" className="cal-ocean__today" onClick={() => { if (!enabledLayers.has("google")) toggleLayer("google"); connectGoogle(); }}
+                  title="Reconnect Google Calendar — fixes a broken or expired connection"
                   style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                  <span style={{ width: 7, height: 7, borderRadius: 999, background: "#4285F4" }} /> Connect Google
+                  <RotateCw className="w-[14px] h-[14px]" /> Reconnect
                 </button>
-              )
+              </>
+            ) : (
+              <button type="button" className="cal-ocean__today" onClick={() => { if (!enabledLayers.has("google")) toggleLayer("google"); connectGoogle(); }} title="Connect Google Calendar"
+                style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <span style={{ width: 7, height: 7, borderRadius: 999, background: "#4285F4" }} /> Connect Google
+              </button>
             )}
             <div className="cal-ocean__seg">
               {[["dayGridMonth", "Month", LayoutGrid], ["timeGridWeek", "Week", Columns3], ["timeGridDay", "Day", RectangleVertical]].map(([v, lbl, Icon]) => (
@@ -860,7 +873,26 @@ export default function CalendarPage() {
         <MilestoneModal teamId={activeTeamId} dark={dark} initialDate={milestoneModal.initialDate} milestone={milestoneModal.milestone} onClose={() => setMilestoneModal(null)} onSaved={reload} />
       )}
       {meetingModal && (
-        <ScheduleMeetingModal rooms={rooms} teamId={activeTeamId} dark={dark} initialStart={meetingModal.initialStart} meeting={meetingModal.meeting} onClose={() => setMeetingModal(null)} onCreated={reload} onDeleted={reload} />
+        <ScheduleMeetingModal
+          rooms={rooms} teamId={activeTeamId} dark={dark}
+          initialStart={meetingModal.initialStart}
+          initialAttendeeIds={meetingModal.initialAttendeeIds}
+          initialExternalEmails={meetingModal.initialExternalEmails}
+          initialDuration={meetingModal.initialDuration}
+          meeting={meetingModal.meeting}
+          onClose={() => setMeetingModal(null)} onCreated={reload} onDeleted={reload}
+        />
+      )}
+      {findTime && (
+        <FindATimeModal
+          teamId={activeTeamId} rooms={rooms} dark={dark}
+          onClose={() => setFindTime(false)}
+          onScheduled={() => { setFindTime(false); reload(); }}
+          onMoreOptions={({ start, attendeeIds, externalEmails, duration }) => {
+            setFindTime(false);
+            setMeetingModal({ initialStart: start, initialAttendeeIds: attendeeIds, initialExternalEmails: externalEmails, initialDuration: duration });
+          }}
+        />
       )}
       {taskEdit && (
         <TaskDetailSheet

@@ -1,9 +1,10 @@
-import { useState, useEffect, lazy, Suspense } from "react";
+import { useState, useEffect, useRef, lazy, Suspense } from "react";
 import { BrowserRouter, Routes, Route, useLocation, useNavigate, Navigate } from "react-router-dom";
 import { App as CapApp } from "@capacitor/app";
 import { Browser } from "@capacitor/browser";
 import { StatusBar, Style } from "@capacitor/status-bar";
 import { supabase } from "./supabase";
+import { isIntentionalSignOut, clearIntentionalSignOut, recoverSession } from "./lib/sessionRecovery";
 import { isMobileApp, getPlatform } from "./lib/platform";
 import { requestNotificationPermissions } from "./lib/nativeNotifications";
 import { addNotificationTapListener, consumePendingNotificationRoute } from "./lib/persistentTimer";
@@ -58,6 +59,7 @@ const TeamPage = lazy(() => import("./pages/TeamPage"));
 const TeamTimesheetsPage = lazy(() => import("./pages/TeamTimesheetsPage"));
 const WhiteboardsListPage = lazy(() => import("./pages/WhiteboardsListPage"));
 const WhiteboardPage = lazy(() => import("./pages/WhiteboardPage"));
+const PublicWhiteboardPage = lazy(() => import("./pages/PublicWhiteboardPage"));
 const OfficePage = lazy(() => import("./pages/OfficePage"));
 const MeetingSummariesPage = lazy(() => import("./pages/MeetingSummariesPage"));
 const CalendarPage = lazy(() => import("./pages/CalendarPage"));
@@ -75,6 +77,49 @@ import { toElectronAuthPayload } from "./electron/authSessionBridge";
 function publishElectronAuthSession(session) {
   if (typeof window === "undefined") return;
   window.__electronAuthBridge?.publishSession?.(toElectronAuthPayload(session));
+}
+
+// Non-blocking pill shown while a transient auth failure is being recovered.
+// Fixed, centered under the safe-area top; pointer-events: none so it never
+// intercepts taps. Theme-neutral (dark glass reads on any background).
+function ReconnectingBanner() {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      style={{
+        position: "fixed",
+        top: "calc(env(safe-area-inset-top, 0px) + 10px)",
+        left: "50%",
+        transform: "translateX(-50%)",
+        zIndex: 2147483000,
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "6px 12px",
+        borderRadius: 9999,
+        background: "rgba(15,23,42,0.92)",
+        color: "#f1f5f9",
+        font: "500 12px/1 system-ui, sans-serif",
+        boxShadow: "0 6px 20px rgba(0,0,0,.35)",
+        pointerEvents: "none",
+        maxWidth: "90vw",
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 8,
+          height: 8,
+          borderRadius: "50%",
+          background: "#fbbf24",
+          animation: "ql-recon-pulse 1s ease-in-out infinite",
+        }}
+      />
+      <span>Reconnecting…</span>
+      <style>{"@keyframes ql-recon-pulse{0%,100%{opacity:1}50%{opacity:.3}}"}</style>
+    </div>
+  );
 }
 
 // Shared placeholder shown while a lazy route chunk downloads. Dependency-
@@ -495,18 +540,58 @@ function AuthenticatedApp({ session }) {
 
 export default function App() {
   const [session, setSession] = useState(undefined);
+  // Surfaces a subtle "Reconnecting…" pill while a transient auth failure is
+  // being recovered (the session is held stale meanwhile, so data reads may
+  // 401 — this tells the user the app is working on it, not broken).
+  const [recovering, setRecovering] = useState(false);
+  // The last session we successfully held — the source of a still-valid refresh
+  // token to recover from. `recovering` guards against re-entrancy: each failed
+  // refresh attempt re-emits SIGNED_OUT, which must not kick off a second loop.
+  const lastGoodSessionRef = useRef(null);
+  const recoveringRef = useRef(false);
 
   useEffect(() => {
+    // Honor a resolved (recovered or genuinely gone) session, clearing recovery.
+    const settle = (s) => {
+      recoveringRef.current = false;
+      setRecovering(false);
+      lastGoodSessionRef.current = s || null;
+      publishElectronAuthSession(s || null);
+      setSession(s || null);
+    };
+
     supabase.auth.getSession().then(({ data }) => {
-      const nextSession = data.session ?? null;
-      publishElectronAuthSession(nextSession);
-      setSession(nextSession);
+      settle(data.session ?? null);
     });
+
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_e, s) => {
-      publishElectronAuthSession(s);
-      setSession(s);
+      // A real session arrived (sign-in / token refresh / recovery succeeded).
+      if (s) { settle(s); return; }
+
+      // Null session. A user-initiated sign-out is honored immediately.
+      if (isIntentionalSignOut()) { clearIntentionalSignOut(); settle(null); return; }
+
+      // Unintentional SIGNED_OUT. If it fired while we're already recovering
+      // (a failed retry re-emits it), ignore — the loop is handling it.
+      if (recoveringRef.current) return;
+
+      // No prior good session to recover from → this is a genuine logged-out
+      // state (e.g. a fresh, never-signed-in load), honor it.
+      const snap = lastGoodSessionRef.current;
+      if (!snap) { settle(null); return; }
+
+      // Transient refresh failure mid-session: DON'T tear the app (and the live
+      // call) down. Keep showing the current session while we retry the refresh
+      // with the last-good token; only honor the logout if recovery truly fails.
+      recoveringRef.current = true;
+      setRecovering(true);
+      recoverSession(snap, { isAborted: () => !recoveringRef.current }).then((res) => {
+        if (!recoveringRef.current) return; // a real session already settled us
+        if (res.ok) settle(res.session);
+        else settle(null); // genuine logout (dead token or outage past budget)
+      });
     });
     return () => subscription.unsubscribe();
   }, []);
@@ -601,6 +686,7 @@ export default function App() {
 
   return (
     <ThemeProvider>
+      {recovering && <ReconnectingBanner />}
       <BrowserRouter>
         <Suspense fallback={ROUTE_FALLBACK}>
         <Routes>
@@ -617,6 +703,10 @@ export default function App() {
             path="/device"
             element={isDevice ? <DeviceKioskPage session={session} /> : session ? <Navigate to="/" replace /> : <DevicePairPage />}
           />
+          {/* Public read-only whiteboard — renders OUTSIDE the auth gate so
+              anyone with the link (even signed out) can view a scope='public'
+              board. RLS returns the row only when it's public. */}
+          <Route path="/w/:whiteboardId" element={<PublicWhiteboardPage />} />
           <Route
             path="/*"
             element={isDevice ? <DeviceKioskPage session={session} /> : session ? <AuthenticatedApp session={session} /> : <LocalTimerPage />}

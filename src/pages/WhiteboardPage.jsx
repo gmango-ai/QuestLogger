@@ -72,6 +72,7 @@ import {
   setWhiteboardGoal,
   setWhiteboardTitle,
   archiveWhiteboard,
+  saveWhiteboardThumbnail,
   TEMPLATES,
 } from "../lib/whiteboard";
 import {
@@ -627,7 +628,9 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
     session?.user?.email?.split("@")[0] ||
     "";
 
-  const collabEnabled = !loading && !!board?.id;
+  // Read-only (e.g. the public /w/:id viewer) never joins the realtime channel:
+  // it renders the snapshot statically and must not send/apply broadcast ops.
+  const collabEnabled = !loading && !!board?.id && !readOnly;
 
   // ── undo / redo (entity-scoped, multiplayer-safe). Set up BEFORE sync so it
   // can hand sync its onRemoteApply seam (peer edits fold into the baseline
@@ -1390,11 +1393,15 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
   // behavior-neutral.
 
   // ── board persistence: load/seed + debounced save + flush + font-load ──
+  // onSaved fires after a real persisted change; routed through a ref because the
+  // thumbnail generator is defined later in this component (avoids a TDZ ref).
+  const scheduleThumbnailRef = useRef(null);
   useWhiteboardPersistence({
     boardId, embedded, rf,
     nodes, edges, setNodes, setEdges,
     board, setBoard, loading, setLoading, setError, setSaveState,
-    setTitleDraft, setGoalDraft,
+    setTitleDraft, setGoalDraft, readOnly,
+    onSaved: () => scheduleThumbnailRef.current?.(),
   });
 
   // ── handlers ──
@@ -2182,6 +2189,7 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
   // only the paste event exposes clipboard contents.
   useEffect(() => {
     function onPaste(e) {
+      if (readOnly) return;
       const el = document.activeElement;
       if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
       const boardEl = mainRef.current;
@@ -2197,7 +2205,7 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
     }
     window.addEventListener("paste", onPaste);
     return () => window.removeEventListener("paste", onPaste);
-  }, [addImageNode]);
+  }, [addImageNode, readOnly]);
 
   // Double-click empty canvas → drop a text node at the cursor, ready to type.
   // Gated to the pane itself so double-clicking a node still just edits it.
@@ -2455,7 +2463,7 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
     copyRef, cutRef, cloneRef,
     cancelAreaSelection, deleteAreaSelection, areaSelRef,
     reorderSelected, bumpSelectedFontSize,
-    mainRef, lastClientRef,
+    mainRef, lastClientRef, readOnly,
   });
   const bottomStackOffset = 15 + toolbarH + BOTTOM_PANEL_GAP;
   const brushStackH = tool === "brush" ? PAINT_TOOLBAR_STACK_H : 0;
@@ -2474,7 +2482,7 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
   // Title / goal / archive — same flow as the prior page, just leaning
   // on the existing setters in lib/whiteboard.
   async function handleSaveTitle() {
-    if (!board) return;
+    if (!board || readOnly) return;
     const next = titleDraft.trim() || "Untitled whiteboard";
     const { error: err } = await setWhiteboardTitle(board.id, next);
     if (err) {
@@ -2485,7 +2493,7 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
     setTitleEditing(false);
   }
   async function handleSaveGoal() {
-    if (!board) return;
+    if (!board || readOnly) return;
     const next = goalDraft.trim();
     const { error: err } = await setWhiteboardGoal(board.id, next);
     if (err) {
@@ -2551,6 +2559,49 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
   const handleExportPng = useCallback(() => {
     exportPng(getNodesBounds(rf.getNodes()), 48);
   }, [exportPng, rf]);
+
+  // ── Preview thumbnail: a small JPEG of the whole board, regenerated ~5s after
+  // edits settle (only after a real save). Best-effort — never blocks or errors
+  // the board; skipped for read-only viewers and embedded room tiles.
+  const thumbTimerRef = useRef(null);
+  const generateThumbnail = useCallback(async () => {
+    if (readOnly || embedded || !board?.id) return;
+    // A non-owner viewing a public board has an editable-looking (but RLS
+    // no-op) canvas — never let it try to overwrite the owner's thumbnail
+    // (the update would be denied anyway; skip the wasted capture + write).
+    if (board.scope === "public" && board.owner_id !== session?.user?.id) return;
+    const el = mainRef.current?.querySelector(".react-flow__viewport");
+    if (!el) return;
+    const bounds = getNodesBounds(rf.getNodes());
+    if (!bounds || !bounds.width || !bounds.height) return;
+    const pad = 24;
+    const zoom = Math.min(1, 320 / Math.max(bounds.width, bounds.height));
+    const w = Math.ceil(bounds.width * zoom + pad * 2);
+    const h = Math.ceil(bounds.height * zoom + pad * 2);
+    try {
+      const { toJpeg } = await import("html-to-image");
+      const dataUrl = await toJpeg(el, {
+        backgroundColor: dark ? "#0f172a" : "#fbf6ee",
+        width: w, height: h, pixelRatio: 1, cacheBust: true, quality: 0.7,
+        style: {
+          width: `${w}px`, height: `${h}px`,
+          transform: `translate(${pad - bounds.x * zoom}px, ${pad - bounds.y * zoom}px) scale(${zoom})`,
+        },
+      });
+      // Guard against a pathologically dense board bloating the row (and every
+      // list query that pulls thumbnails). ~120KB of data URL is plenty for a
+      // 320px preview; skip the write past that and keep the icon fallback.
+      if (dataUrl.length > 120_000) return;
+      await saveWhiteboardThumbnail(board.id, dataUrl);
+      setBoard((b) => (b ? { ...b, thumbnail: dataUrl } : b));
+    } catch { /* best-effort */ }
+  }, [readOnly, embedded, board?.id, board?.scope, board?.owner_id, session?.user?.id, rf, dark]);
+  const scheduleThumbnail = useCallback(() => {
+    clearTimeout(thumbTimerRef.current);
+    thumbTimerRef.current = setTimeout(() => { generateThumbnail(); }, 5000);
+  }, [generateThumbnail]);
+  useEffect(() => { scheduleThumbnailRef.current = scheduleThumbnail; }, [scheduleThumbnail]);
+  useEffect(() => () => clearTimeout(thumbTimerRef.current), []);
 
   const template = useMemo(
     () => (board?.template_key ? TEMPLATES[board.template_key] : null),
@@ -2711,10 +2762,10 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
         onNodeDragStart={onNodeDragStartClone}
         onNodeDragStop={onNodeDragStop}
         onNodeClick={onNodeClick}
-        onDoubleClick={tool === "select" ? onPaneDoubleClick : undefined}
+        onDoubleClick={tool === "select" && !readOnly ? onPaneDoubleClick : undefined}
         onMoveEnd={(_, vp) => { if (!embedded) saveViewport(board?.id, vp); }}
         onDragOver={onWbDragOver}
-        onDrop={onWbDrop}
+        onDrop={readOnly ? undefined : onWbDrop}
         zoomOnDoubleClick={false}
         connectionMode={ConnectionMode.Loose}
         connectionLineComponent={ConnectionLine}
@@ -2729,9 +2780,9 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
         // you can gesture over the board without disturbing it.
         // Node drag is off while a floating region selection is active — the
         // selection overlay owns the move then.
-        nodesDraggable={tool === "select" && !areaSel}
-        nodesConnectable={tool === "select"}
-        elementsSelectable={tool === "select"}
+        nodesDraggable={tool === "select" && !areaSel && !readOnly}
+        nodesConnectable={tool === "select" && !readOnly}
+        elementsSelectable={tool === "select" && !readOnly}
         // Region select is folded into the select tool: desktop left-drag on the
         // pane draws OUR box (onWbPointerDownCapture), which now marks the nodes it
         // covers `selected` LIVE (so they highlight as it passes, and the align +
@@ -2966,6 +3017,7 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
             width (100% — a React Flow Panel is positioned within it), so an
             embedded room panel scrolls the rail instead of clipping it; w-max
             sizes to content up to that cap. */}
+        {!readOnly && (
         <Panel position="bottom-left" className="w-max max-w-[calc(100%-16px)]">
           <div
             ref={toolbarRef}
@@ -3094,6 +3146,7 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
           )}
           </div>
         </Panel>
+        )}
 
         {/* Node inspector (shape/fill/border/text) hovers above the
               selected node, like the edge toolbar. Edges use their own
@@ -3215,7 +3268,7 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
           floating tool picker; new nodes spawn right where the palette sits (the
           cursor). The centre is an "X" that clears the selection and drops back
           to select mode. Works even when the left toolbar is collapsed. */}
-      {palette && (
+      {palette && !readOnly && (
         <>
           <div className="fixed inset-0 z-[59]" onClick={() => setPalette(null)} aria-hidden />
           <div
@@ -3337,13 +3390,13 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
               className={`text-sm font-bold inline-flex items-center gap-1.5 cursor-text max-w-[220px] ${
                 dark ? "text-slate-100" : "text-slate-800"
               }`}
-              onDoubleClick={() => setTitleEditing(true)}
+              onDoubleClick={() => { if (!readOnly) setTitleEditing(true); }}
               title="Double-click to rename"
             >
               <span className="truncate">{board.title}</span>
               <button
                 type="button"
-                onClick={() => setTitleEditing(true)}
+                onClick={() => { if (!readOnly) setTitleEditing(true); }}
                 className={`opacity-50 hover:opacity-100 shrink-0 ${
                   dark ? "text-slate-300" : "text-slate-500"
                 }`}
@@ -3606,7 +3659,7 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
                 <span className="text-[8.5px] font-bold tracking-[0.13em] uppercase text-white/85">
                   Goal for next week
                 </span>
-                {!goalEditing && (
+                {!goalEditing && !readOnly && (
                   <button
                     type="button"
                     onClick={() => {
@@ -3669,7 +3722,8 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
             is toggleable; peers' emotes still render when it's hidden. */}
       <EmoteOverlay
         channelKey={`whiteboard:${board.id}`}
-        barPosition={emoteBarOn ? "bottom-center" : "hidden"}
+        enabled={!readOnly}
+        barPosition={!readOnly && emoteBarOn ? "bottom-center" : "hidden"}
         // Sit just above whatever's stacked at bottom-center: the measured
         // toolbar (panel margin 15 + height + gap), plus any paint/inspector
         // bars stacked above it.

@@ -226,7 +226,10 @@ export default function RoomSettingsModal({
     setDirty((d) => ({ ...d, duration: true }));
   }
 
-  const cardCls = `relative w-full max-w-md rounded-2xl border p-5 sm:p-6 ${
+  // Cap the card at the viewport (dvh accounts for mobile browser chrome) and
+  // let the body scroll — the form has grown tall enough to overflow small
+  // screens. Header + footer stay pinned outside the scroll area.
+  const cardCls = `relative w-full max-w-md rounded-2xl border flex flex-col overflow-hidden max-h-[calc(100dvh-1.5rem)] sm:max-h-[calc(100dvh-2rem)] ${
     dark ? "bg-[var(--color-surface)] border-[var(--color-border)] shadow-2xl shadow-black/40" : "bg-white border-slate-200 shadow-xl"
   }`;
   const labelCls = `text-[10px] font-semibold uppercase tracking-wider ${dark ? "text-slate-400" : "text-slate-500"}`;
@@ -246,13 +249,16 @@ export default function RoomSettingsModal({
           <X className="w-4 h-4" />
         </button>
 
-        <h2 className={`text-lg font-bold mb-4 flex items-center gap-2 ${dark ? "text-slate-100" : "text-slate-800"}`}>
+        <h2 className={`text-lg font-bold flex items-center gap-2 px-5 sm:px-6 pt-5 sm:pt-6 pb-4 shrink-0 ${dark ? "text-slate-100" : "text-slate-800"}`}>
           <span
             className="w-3 h-3 rounded-md border border-black/10"
             style={{ background: color }}
           />
           Room settings
         </h2>
+
+        {/* Scrollable body — everything between the pinned header and footer. */}
+        <div className="flex-1 min-h-0 overflow-y-auto px-5 sm:px-6">
 
         {/* Name */}
         <div className="mb-4">
@@ -583,7 +589,10 @@ export default function RoomSettingsModal({
           </label>
         </div>
 
-        <div className="flex items-center gap-2">
+        </div>{/* /scrollable body */}
+
+        {/* Footer (pinned) */}
+        <div className={`flex items-center gap-2 px-5 sm:px-6 py-4 border-t shrink-0 ${dark ? "border-[var(--color-border)]" : "border-slate-200"}`}>
           {confirmDelete ? (
             <div className="flex items-center gap-2 flex-1">
               <span className={`text-xs ${dark ? "text-slate-300" : "text-slate-600"}`}>
