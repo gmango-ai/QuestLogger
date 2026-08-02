@@ -4,6 +4,212 @@ Notable changes to Mangodoro. Pre-1.0, so grouped by date/area rather than
 semantic versions. Newest first. Each release lists **New & improved** (features
 and changes to features) and **Fixes**.
 
+## 2026-07-25
+
+### New & improved
+
+- feat(whiteboards): clickable cards + preview thumbnails
+- feat(whiteboards): invite-only sharing + public boards + scope settings
+- feat(calendar): "Find a time" scheduler + always-present Google reconnect
+- feat(rooms): meeting auto-close warning + extend, ephemeral chat, modal overflow fix
+
+### Fixes
+
+- (auth): safer auto-rejoin + a reconnecting indicator
+- (audio): harden + simplify the LiveKit audio pipeline
+- (auth): survive transient token-refresh failures without ejecting the call
+- (kiosk): grid holds order; only surface an off-screen speaker
+- (identity): seed name/avatar from Google OAuth metadata
+
+## 2026-07-17
+
+### New & improved
+
+- feat(widgets): weather widget + chip popovers open/fit instead of inheriting collapse
+- feat(widgets): drop room-only whiteboard widget, move drawer button to row 2, readable goals
+- feat(video): auto-center a shared screen + multi-share, zoom, fill-screen PiP
+- feat(widgets): show the meeting name with the time in the strip chip
+- feat(widgets): pinned topbar strip + app-wide widget drawer
+- feat(widgets): sync widget order + pins to the account
+- refactor(widgets): unify sidebar + room-tile lists into one registry
+
+### Fixes
+
+- Align GoalsChip scope with GoalsWidget using syncSession room id
+- (widgets): team strip chip always shows + wider chip popovers
+- (widgets): denser goals list + meetings chip rolls past started meetings
+- (widgets): task source, meeting next, pin persistence, strip reorder
+- (video): keep a shared screen the focus over active speaker + kiosk
+
+## 2026-07-15
+
+### New & improved
+
+- feat(calendar): company events live on the Team tab; Join goes to the event
+- feat(calendar): remove company events with one/all/selection for recurring
+- feat(office): show company events in the Upcoming meetings widget
+- feat(calendar): collapse recurring company events to one expandable row
+- feat(calendar): import & separate company events from Google → team calendar
+- diag(video): log the room-mic gate decision to trace mic-leak reports
+- test(video): grid order ignores speaking; overflow-surfacing keeps positions
+- feat(electron): sign in via the system browser, not an embedded popup
+
+### Fixes
+
+- Update publisherMap after publishing events so canRemove works immediately
+- OAuth restart error silenced, company event remove permission check, widget meeting fairness
+- (calendar): don't show a published company event twice on personal view
+- (calendar): company-event upsert conflict + review state wiped on rerender
+- (video): hard-lock a follower's mic so it can't leak into the room
+- (video): keep call audio playing through PiP / pop-out re-parenting
+- (office): render the "Add to view" menu in a portal so it's never hidden
+- (kiosk): grid highlights the speaker without reshuffling tiles
+
+## 2026-07-14
+
+### New & improved
+
+- feat(kiosk): ticker fixed-lines + inline sources/icons; settings in headers; multi-city weather
+- feat(kiosk): save & switch named layouts
+- feat(kiosk): unified Ticker (goals + news), modal picker, more sources
+- feat(kiosk): multi-line news ticker — a scrolling line per source
+- feat(office): drop a panel at the outer edge to stretch it full-span
+- feat(kiosk): news ticker (server-side RSS proxy)
+- feat(kiosk): weather panel (Open-Meteo, keyless)
+- feat(office): hallway floor plan scales to fit + team list to the side
+- feat(kiosk): full team roster (everyone's location) replaces "Who's here"
+- feat(kiosk): dark tile chrome, Add menu + Lock (hide bars), drop quick toggles
+- feat(kiosk): only connect the LiveKit call when a human is in it
+- feat(office): badge rooms with a live display on the hallway floor plan
+- feat(rooms): show "Room display on" in the pre-join when a kiosk is live
+- feat(kiosk): room meetings view + imminent-meeting alert with chime
+- feat(kiosk): status-aware "Who's here" roster on the device display
+- feat(video): respect incoming video native size to avoid crop/stretch
+- chore(db): repair migration history — align local files to applied remote stamps
+- feat(db): device kiosk SELECT on user_presence for its room's occupants
+
+### Fixes
+
+- Guard presence listeners before subscribe in useOfficeDisplays
+- Show connecting/error UI, fix display badge subscribe, fix roster room highlight
+- (video): grid highlights the speaker without reshuffling tiles
+- (presence): roster shows your room when viewing it + keeps in-room offline people
+- (video): kiosk tile parity via shared tileChrome (camera-off avatar, grid default, overflow)
+
+## 2026-07-10
+
+### New & improved
+
+- Guard stale lunch auto-return
+- feat(whiteboard): rich text — italic/underline/strike + line-height + kerning
+- refactor(whiteboard): text panel as a compact format bar
+- feat(whiteboard): font-weight selector + compact, themed text panel
+- feat(whiteboard): disable edit-on-create; Enter edits the selected node
+- feat(whiteboard): custom marquee with live highlight, align + bulk-edit, additive Shift
+- feat(whiteboard): fold crossing edges + brush paint into native selection
+- feat(whiteboard): bulk-edit multiple same-type selected nodes
+- feat(whiteboard): native React Flow multi-select as the primary select gesture
+- feat(whiteboard): marquee/lasso selects edges by crossing them
+- feat(whiteboard): propagate keyboard zoom to followers; fix mobile selection drag/deselect
+- feat(whiteboard): follow a collaborator's view + hover-for-names
+- feat(calendar): theme-aware calendar & tasks + week width levels
+- feat(onboarding): add a switch to disable onboarding hints
+- feat(whiteboard): selection envelopes its items instead of a bbox rectangle
+- feat(whiteboard): bigger toolbar buttons (48px touch / 40px mouse)
+- feat(whiteboard): keyboard-shortcuts cheatsheet (press ?)
+- feat(whiteboard): support image transparency
+- feat(whiteboard): stamp sticky/goal/frame/image + no auto-edit on placement
+- feat(onboarding): guided welcome tour + full-app tour coverage
+- feat(tasks): timeline overview + unified task editor across all surfaces
+- feat(whiteboard): stamp a shape — number keys place a shape at the cursor
+- feat(whiteboard): single-key tool shortcuts + font-size & z-order keys
+- feat(whiteboard): live auto-shape preview + fewer false ellipses
+- feat(whiteboard): pen auto-shape — draw & hold to snap to shapes/edges
+- refactor(whiteboard): extract usePalmRejection (version 3 foundation)
+- refactor(whiteboard): extract useWhiteboardInspector + useWhiteboardRegionSelect
+- feat(google): refresh the token on-demand at API guards, not just in the timer
+- refactor(whiteboard): extract useWhiteboardKeyboard
+- feat(google): silent token refresh so Calendar/Docs stay connected
+- refactor(whiteboard): extract useWhiteboardPersistence
+- refactor(whiteboard): extract useWhiteboardClipboard
+- refactor(whiteboard): extract toolbar + overlay components
+- refactor(whiteboard): extract pure utils + storage helpers
+- feat(office): widgets as room views + drop Arrange, move Leave
+- **chore** — room type setter, OAuth account chooser, nav + widget fixes
+- feat(status): drop legacy presence_state, unify on user_presence
+- feat(calendar): responsive rails, icon views, name-first chips + Google cache
+- feat(status): P4 (2/2) — drop the resolver's per-tick legacy write-through
+- feat(status): P4 (1/2) — occupant surfaces read user_presence, not presence_state
+- feat(whiteboard): :emoji: shortcodes in sticky notes + text nodes
+- feat(chat): back :emoji: shortcodes with the full Unicode set (~3.9k names)
+- feat(chat): apply EmojiTextField across free-text inputs + show all matches
+- feat(chat): reusable EmojiTextField — :emoji: shortcodes on any input, with arrow-key nav
+- **Whiteboard** — speed up the airbrush (and all wet-layer strokes) on mobile
+- feat(chat): Discord-style :emoji: shortcodes
+- **Profile** — browse previous focus notes with their Result status
+- refactor(status): remove the Status setter from Settings
+- feat(status): P5 — unified manual status UI (message, emoji, expiry, pin, invisible)
+- feat(status): P3 — server-side offline sweep (pg_cron)
+- feat(status): team status roster (combined in-room + team view)
+- **Whiteboard** — raster brush strokes read as one mark (wet-layer opacity)
+- feat(status): P2 — single leader-owned presence writer + heartbeat
+- feat(status): P1 — resolver emits 7 states + new precedence
+- **Whiteboard** — clamp toolbar popovers to viewport + tighten gap to the bar
+- **Whiteboard** — lasso select + unify all toolbar popovers to portal above trigger
+- feat(status): P0 — 7-state vocabulary + one shared presence map
+- **docs** — status-system rewrite plan (targeted, 7-state)
+- **Whiteboard** — fix inert region selection (pointer-events + click-off to place)
+- **Whiteboard** — fold region-select into the select tool + fix color popover & drag
+- refactor(planner): declutter the expanded task panel
+- feat(pomodoro): focus-task subtasks + task→status link
+- feat(calendar): surface subtask counts on task chips + Tasks card
+- feat(planner): redesign task rows with progressive disclosure
+- **Whiteboard/App** — fix startup crash, add route error boundary + mobile nav
+- feat(tasks): subtasks in the office Tasks widget
+- feat(tasks): subtasks + AI generation + subtask-driven progress (planner)
+- **Calendar** — expanded view = full month grid (no +more), not a list
+- **Calendar** — work-location conflict resolution + expanded month view
+- **Calendar** — goal grouping/collapse, work-location merge, agenda structure, tasks card
+- **Whiteboard** — Apple Pencil overhaul + region select, clear-all, live raster sync
+- **Meetings** — show record toggle to team admins, not just the session leader
+- **Calendar** — render weekly goals & OOO as full-span bars
+- Remove deprecated retros feature (whiteboards replaced it)
+- **Calendar** — restore a visible Google Calendar connect/sync control
+- **Calendar** — day hierarchy, meeting priority, work-hours band, unified agenda
+- **Calendar** — Mangodoro ocean reskin + type-distinct chips, priority, editing
+- Calendar (Phase 3): team scope, Google two-way, attendees & timezones
+- Calendar (Phase 2): deadlines, milestones, drag-to-schedule, list view
+- Calendar (Phase 1): read-only command-center overview
+- **Meetings** — AI summaries, room scheduling, Google Calendar/Docs
+- Retire Jitsi/JaaS; standardize video on LiveKit
+
+### Fixes
+
+- (db): resolve migration version collision on 20260709150000
+- (whiteboard): bulk-edit dropdowns no longer clipped
+- (whiteboard): contextual toolbars follow the app theme
+- (whiteboard): connect edges to nodes inside a frame (absolute rects)
+- (whiteboard): marquee-select edges, connect to framed shapes, mobile endcaps
+- (whiteboard): block iOS long-press callout/magnifier on the canvas pane
+- (whiteboard): Shift+number no longer arms a shape stamp (Shift+1 = fit view)
+- (whiteboard): frames are selectable again; empty paint tiles don't inflate the box
+- (whiteboard): single content-fitted selection box; ignore empty frames
+- (whiteboard): selection wraps only drawn items; hit area matches; re-marquee works
+- (whiteboard): keep top-center overlays clear of the title card
+- (onboarding): tours now persist completion (stop re-offering finished tours)
+- (whiteboard): stop auto-zoom on draw (drop the fitView prop)
+- (chat): select-none on the clickable author name
+- (chat): click a message avatar/name to open the profile popover
+- (whiteboard): click empty canvas deselects (region-drag only on move)
+- (whiteboard): don't start a region box on node clicks (broke selection)
+- (meetings): make the schedule-meeting dialog fit any viewport
+- (presence): heartbeat-based liveness, Away<12h before Offline
+- (milestones): default created_by to auth.uid()
+- (notifications): clearing didn't persist — add recipient DELETE policy
+- (chat): @mentions highlight + open profile in the /messages view
+- (status): P6 — repair focus-aware notification DND for the 7-state vocab
+- Repeating 'set your working hours' nudge
+
 ## 2026-07-07
 
 ### New & improved
