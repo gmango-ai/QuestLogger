@@ -5,7 +5,7 @@ import { useSyncSession } from "../../context/SyncSessionContext";
 import { Button } from "@/components/ui/button";
 import {
   Hash, Briefcase, MessageSquare, Lock, Globe,
-  LogIn, LogOut, Play, PanelLeftOpen, PanelLeftClose, ChevronDown, Settings,
+  LogIn, LogOut, Play, ChevronDown, Settings,
   Copy, Check, CalendarPlus,
 } from "lucide-react";
 import { getRoomAccessCode } from "../../lib/rooms";
@@ -59,7 +59,7 @@ function RoomSessionAction({ room, activeSession, busy, onJoin, onStart, current
 
 export default function RoomView({
   room, activeSession, orgTeams, busy, onJoin, onStart,
-  sidebarOpen, mobileSidebarOpen = false, onToggleSidebar, onOpenRoomSwitcher, onLeaveRoom,
+  onOpenRoomSwitcher, onLeaveRoom,
   onEditRoom, canEditRoom,
 }) {
   const { theme } = useTheme();
@@ -198,9 +198,6 @@ export default function RoomView({
     .map((rt) => (orgTeams || []).find((t) => t.id === rt.org_team_id))
     .filter(Boolean);
 
-  const DesktopSidebarIcon = sidebarOpen ? PanelLeftClose : PanelLeftOpen;
-  const MobileSidebarIcon = mobileSidebarOpen ? PanelLeftClose : PanelLeftOpen;
-
   return (
     <div className="flex flex-col h-full min-h-0">
       <header
@@ -214,42 +211,10 @@ export default function RoomView({
         <div className="flex flex-col gap-2 @xl:flex-row @xl:items-center @xl:gap-3">
           {/* Identity — room name, switcher. Grows to fill and truncates. */}
           <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
-            {/* Widgets toggle — opens the pomodoro / room / world-clock / goals
-                sidebar (a full overlay on mobile). Sits left of the room title;
-                shown on every size (larger touch target on mobile). */}
-            {onToggleSidebar && (
-              <>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  onClick={onToggleSidebar}
-                  title={mobileSidebarOpen ? "Hide widgets" : "Show widgets"}
-                  aria-label={mobileSidebarOpen ? "Hide widgets sidebar" : "Show widgets sidebar"}
-                  aria-pressed={mobileSidebarOpen}
-                  className={`inline-flex md:hidden h-10 w-10 shrink-0 ${
-                    dark ? "text-slate-400 hover:text-slate-100" : "text-slate-500 hover:text-slate-800"
-                  }`}
-                >
-                  <MobileSidebarIcon className="w-5 h-5" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  onClick={onToggleSidebar}
-                  title={sidebarOpen ? "Hide widgets" : "Show widgets"}
-                  aria-label={sidebarOpen ? "Hide widgets sidebar" : "Show widgets sidebar"}
-                  aria-pressed={sidebarOpen}
-                  className={`hidden md:inline-flex h-8 w-8 shrink-0 ${
-                    dark ? "text-slate-400 hover:text-slate-100" : "text-slate-500 hover:text-slate-800"
-                  }`}
-                >
-                  <DesktopSidebarIcon className="w-4 h-4" />
-                </Button>
-              </>
-            )}
-
-            {/* Leave room — sits right after the widget-rail toggle and before
-                the room name, so it's the first control you reach. */}
+            {/* Leave room — the first control you reach, sitting immediately
+                before the room name. (The old widgets toggle here was retired:
+                the app-wide widget drawer is reached from the nav's widgets
+                button, so a room-local toggle was redundant.) */}
             {onLeaveRoom && (
               <Button
                 variant="ghost"

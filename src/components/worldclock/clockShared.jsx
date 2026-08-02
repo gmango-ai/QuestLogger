@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Sun, Moon, Search } from "lucide-react";
+import { Sun, Moon, Search, PinOff } from "lucide-react";
 import { localTimeLabel, tzAbbrev, localMinutes } from "../../lib/timezone";
 import { searchCities, preloadCities } from "../../lib/citySearch";
 
@@ -57,6 +57,54 @@ export function ClockRow({ loc, dark, trailing = null }) {
       </div>
       {trailing}
     </li>
+  );
+}
+
+// A highlighted "hero" for the pinned timezone — a bigger, emphasized ClockRow
+// (large time + place + local date) shown above the plain list, mirroring how the
+// weather widget features its primary location on top with the rest under. The
+// caller passes the resolved `label`; `onUnpin` renders a corner unpin control.
+export function PinnedClockHero({ tz, label, dark, onUnpin }) {
+  const day = isDaytime(tz);
+  const time = localTimeLabel(tz) || "—";
+  const abbr = tzAbbrev(tz);
+  const off = dayOffsetLabel(tz);
+  let dateStr = "";
+  try { dateStr = new Intl.DateTimeFormat([], { timeZone: tz, weekday: "short", month: "short", day: "numeric" }).format(new Date()); }
+  catch { /* */ }
+  const meta = [abbr, dateStr, off].filter(Boolean).join(" · ");
+  return (
+    <div className={`rounded-xl border p-3 ${
+      dark ? "border-[var(--color-border)] bg-[var(--color-surface-raised)]/60" : "border-slate-200 bg-slate-50"
+    }`}>
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 flex items-center gap-2">
+          {day
+            ? <Sun className="w-4 h-4 shrink-0 text-amber-400" />
+            : <Moon className="w-4 h-4 shrink-0 text-slate-400" />}
+          <div className="min-w-0">
+            <div className={`truncate text-[13px] font-semibold leading-tight ${dark ? "text-slate-100" : "text-slate-800"}`}>
+              {label}
+            </div>
+            {meta && <div className={`text-[10px] leading-tight ${dark ? "text-slate-500" : "text-slate-400"}`}>{meta}</div>}
+          </div>
+        </div>
+        {onUnpin && (
+          <button
+            type="button"
+            onClick={onUnpin}
+            title="Unpin from nav"
+            aria-label="Unpin from nav"
+            className={`shrink-0 p-1 -m-1 rounded text-[var(--color-accent)] ${dark ? "hover:bg-white/5" : "hover:bg-slate-100"}`}
+          >
+            <PinOff className="w-3.5 h-3.5" />
+          </button>
+        )}
+      </div>
+      <div className={`mt-1.5 text-[28px] tabular-nums font-bold leading-none ${dark ? "text-slate-50" : "text-slate-900"}`}>
+        {time}
+      </div>
+    </div>
   );
 }
 

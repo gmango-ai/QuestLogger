@@ -280,20 +280,123 @@ function Attachments({ items, onOpenImage, dark }) {
   );
 }
 
-// ── composer (mentions + attachments + image thumbnails) ──
-function Composer({ onSend, onTyping, candidates, dark, placeholder = "Message…", disabled, allowImages = true }) {
-  const [draft, setDraft] = useState("");
-  const [files, setFiles] = useState([]);
-  const [mentionQ, setMentionQ] = useState(null);
+// ── mention-aware text field (shared by the composer AND the inline editor) ──
+// EmojiTextField (":emoji:" shortcodes) plus an @-teammate autocomplete. Fully
+// controlled — the caller owns `value`; we track only the transient mention
+// query. Auto-grows to fit. Extracted so editing a message keeps the exact same
+// mention/emoji behaviour the composer has (previously the editor was a bare
+// <textarea>, so @-mentions couldn't be picked and had to be retyped by hand).
+function MentionField({
+  value, onChange, candidates = [], onSubmit, onCancel, onTyping, dark,
+  autoFocus, wrapperClassName = "", className, maxHeight = 160, ...rest
+}) {
   const taRef = useRef(null);
-  const fileRef = useRef(null);
-  const filesRef = useRef(files);
+  const [mentionQ, setMentionQ] = useState(null);
 
   const matches = useMemo(() => {
     if (mentionQ == null) return [];
     const q = mentionQ.toLowerCase();
     return candidates.filter((m) => (m.name || "").toLowerCase().includes(q)).slice(0, 6);
   }, [mentionQ, candidates]);
+
+  // Auto-grow to fit (capped), and shrink back when the value is cleared/reset.
+  useLayoutEffect(() => {
+    const el = taRef.current;
+    if (!el) return undefined;
+    const resize = () => {
+      el.style.height = "auto";
+      el.style.height = `${Math.min(el.scrollHeight, maxHeight)}px`;
+    };
+    resize();
+    // The synchronous measure above can be wrong when the field mounts inside a
+    // room tile that isn't laid out yet (or is momentarily hidden) — that would
+    // leave an empty field stuck at the max height with no keystroke to correct
+    // it. Re-measure after the next frame (once layout/flex widths resolve), and
+    // whenever the field's width settles/changes (observing width only, so
+    // setting our own height can't feed back into a loop).
+    const raf = requestAnimationFrame(resize);
+    const wrap = el.parentElement;
+    let ro;
+    if (wrap && typeof ResizeObserver !== "undefined") {
+      let lastW = wrap.clientWidth;
+      ro = new ResizeObserver(() => {
+        const w = wrap.clientWidth;
+        if (w !== lastW) { lastW = w; resize(); }
+      });
+      ro.observe(wrap);
+    }
+    return () => { cancelAnimationFrame(raf); ro?.disconnect(); };
+  }, [value, maxHeight]);
+
+  // Focus + drop the caret at the end when opened as an editor.
+  useEffect(() => {
+    if (!autoFocus) return;
+    const el = taRef.current;
+    if (!el) return;
+    el.focus();
+    const len = el.value.length;
+    try { el.setSelectionRange(len, len); } catch { /* */ }
+  }, [autoFocus]);
+
+  // EmojiTextField already live-expanded :codes:; its synthetic event carries
+  // value + selectionStart, so this only tracks the @-mention query.
+  const handleChange = (e) => {
+    const val = e.target.value;
+    const caret = e.target.selectionStart ?? val.length;
+    const m = val.slice(0, caret).match(/@([\w]*)$/);
+    setMentionQ(m ? m[1] : null);
+    onChange(val);
+    onTyping?.();
+  };
+
+  const pickMention = (member) => {
+    const el = taRef.current;
+    const pos = el ? el.selectionStart : value.length;
+    const before = value.slice(0, pos).replace(/@([\w]*)$/, `@${(member.name || "").replace(/\s+/g, "")} `);
+    onChange(before + value.slice(pos));
+    setMentionQ(null);
+    requestAnimationFrame(() => { try { el?.focus(); el?.setSelectionRange(before.length, before.length); } catch { /* */ } });
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === "Escape") {
+      if (mentionQ != null) { e.preventDefault(); setMentionQ(null); return; }
+      if (onCancel) { e.preventDefault(); onCancel(); return; }
+    }
+    if (e.key === "Enter" && !e.shiftKey && mentionQ == null && onSubmit) { e.preventDefault(); onSubmit(); }
+  };
+
+  return (
+    <div className={`relative ${wrapperClassName}`}>
+      {matches.length > 0 && (
+        <div className={`absolute bottom-full left-0 mb-2 w-64 max-h-52 overflow-y-auto rounded-xl border shadow-lg z-30 ${dark ? "bg-[var(--color-surface)] border-[var(--color-border)]" : "bg-white border-slate-200"}`}>
+          {matches.map((m) => (
+            <button key={m.user_id} type="button" onMouseDown={(e) => { e.preventDefault(); pickMention(m); }}
+              className={`w-full flex items-center gap-2 px-3 py-2 text-left text-sm ${dark ? "hover:bg-white/5 text-slate-200" : "hover:bg-slate-50 text-slate-700"}`}>
+              <UserAvatar url={m.avatar_url || ""} name={m.name || "Member"} size={24} />{m.name || "Member"}
+            </button>
+          ))}
+        </div>
+      )}
+      <EmojiTextField
+        multiline
+        ref={taRef}
+        value={value}
+        onChange={handleChange}
+        onKeyDown={handleKeyDown}
+        className={className}
+        {...rest}
+      />
+    </div>
+  );
+}
+
+// ── composer (mentions + attachments + image thumbnails) ──
+function Composer({ onSend, onTyping, candidates, dark, placeholder = "Message…", disabled, allowImages = true }) {
+  const [draft, setDraft] = useState("");
+  const [files, setFiles] = useState([]);
+  const fileRef = useRef(null);
+  const filesRef = useRef(files);
 
   useEffect(() => {
     filesRef.current.forEach((f) => {
@@ -304,36 +407,12 @@ function Composer({ onSend, onTyping, candidates, dark, placeholder = "Message�
 
   useEffect(() => () => filesRef.current.forEach((f) => f._url && URL.revokeObjectURL(f._url)), []);
 
-  const grow = (el) => { if (el) { el.style.height = "auto"; el.style.height = `${Math.min(el.scrollHeight, 160)}px`; } };
-
-  // EmojiTextField already live-expanded :codes: and its synthetic event carries
-  // value + selectionStart, so this only handles @-mentions + autogrow.
-  const onChange = (e) => {
-    const val = e.target.value;
-    setDraft(val);
-    grow(taRef.current);
-    const caret = e.target.selectionStart ?? val.length;
-    const m = val.slice(0, caret).match(/@([\w]*)$/);
-    setMentionQ(m ? m[1] : null);
-    onTyping?.();
-  };
-
-  const pickMention = (member) => {
-    const ta = taRef.current;
-    const pos = ta ? ta.selectionStart : draft.length;
-    const before = draft.slice(0, pos).replace(/@([\w]*)$/, `@${(member.name || "").replace(/\s+/g, "")} `);
-    setDraft(before + draft.slice(pos));
-    setMentionQ(null);
-    setTimeout(() => ta?.focus(), 0);
-  };
-
   const addFiles = (list) => setFiles((p) => [...p, ...Array.from(list).map((f) => Object.assign(f, { _url: f.type?.startsWith("image/") ? URL.createObjectURL(f) : null }))]);
 
   const submit = async () => {
     const body = expandEmojiShortcodes(draft.trim()); // catch any unexpanded :code:
     if (!body && files.length === 0) return;
-    setDraft(""); setFiles([]); setMentionQ(null);
-    if (taRef.current) taRef.current.style.height = "auto";
+    setDraft(""); setFiles([]);
     await onSend(body, files);
   };
 
@@ -359,15 +438,6 @@ function Composer({ onSend, onTyping, candidates, dark, placeholder = "Message�
         </div>
       )}
       <div className={`relative flex items-end gap-1.5 rounded-2xl border px-1.5 py-1 ${dark ? "bg-[var(--color-surface-raised)] border-[var(--color-border)]" : "bg-white border-slate-200"}`}>
-        {matches.length > 0 && (
-          <div className={`absolute bottom-full left-0 mb-2 w-64 max-h-52 overflow-y-auto rounded-xl border shadow-lg z-30 ${dark ? "bg-[var(--color-surface)] border-[var(--color-border)]" : "bg-white border-slate-200"}`}>
-            {matches.map((m) => (
-              <button key={m.user_id} type="button" onClick={() => pickMention(m)} className={`w-full flex items-center gap-2 px-3 py-2 text-left text-sm ${dark ? "hover:bg-white/5 text-slate-200" : "hover:bg-slate-50 text-slate-700"}`}>
-                <UserAvatar url={m.avatar_url || ""} name={m.name || "Member"} size={24} />{m.name || "Member"}
-              </button>
-            ))}
-          </div>
-        )}
         {allowImages && <input ref={fileRef} type="file" multiple className="hidden" onChange={(e) => { addFiles(e.target.files || []); e.target.value = ""; }} />}
         {allowImages && (
           <button type="button" onClick={() => fileRef.current?.click()} aria-label="Attach"
@@ -375,15 +445,17 @@ function Composer({ onSend, onTyping, candidates, dark, placeholder = "Message�
             <Paperclip className="w-5 h-5 sm:w-[18px] sm:h-[18px]" />
           </button>
         )}
-        <EmojiTextField
-          multiline
-          ref={taRef}
+        <MentionField
           value={draft}
-          onChange={onChange}
-          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && mentionQ == null) { e.preventDefault(); submit(); } }}
+          onChange={setDraft}
+          candidates={candidates}
+          onSubmit={submit}
+          onTyping={onTyping}
+          dark={dark}
+          wrapperClassName="flex-1 min-w-0"
           rows={1}
           placeholder={placeholder}
-          className={`flex-1 resize-none bg-transparent py-2 text-sm outline-none max-h-40 ${dark ? "text-slate-100 placeholder:text-slate-500" : "text-slate-800 placeholder:text-slate-400"}`}
+          className={`w-full resize-none bg-transparent py-2 text-sm outline-none max-h-40 ${dark ? "text-slate-100 placeholder:text-slate-500" : "text-slate-800 placeholder:text-slate-400"}`}
         />
         <button type="button" onClick={submit} disabled={!draft.trim() && files.length === 0} aria-label="Send"
           className="shrink-0 inline-flex items-center justify-center w-11 h-11 sm:w-9 sm:h-9 rounded-xl bg-[var(--color-accent)] text-white disabled:opacity-30 transition-opacity">
@@ -452,6 +524,24 @@ export function Thread({ conversation, name, memberById, candidates, userId, isA
     for (const mem of memberById.values()) if (mem?.name && mem?.user_id) m.set(mem.name, mem.user_id);
     return m;
   }, [memberById]);
+  // Resolve the teammate ids @-mentioned in a body (names are stored de-spaced,
+  // e.g. "@AnaLopez"), excluding yourself. Shared by send AND edit so a mention
+  // added or fixed while editing still fires a ping.
+  const mentionIdsIn = useCallback((body) => {
+    const ids = new Set();
+    if (!body) return ids;
+    for (const tok of (body.match(/@([\w]+)/g) || [])) {
+      const nm = tok.slice(1).toLowerCase();
+      const hit = candidates.find((c) => (c.name || "").replace(/\s+/g, "").toLowerCase() === nm);
+      if (hit && hit.user_id !== userId) ids.add(hit.user_id);
+    }
+    return ids;
+  }, [candidates, userId]);
+  const pingMentions = useCallback((ids, body) => {
+    for (const rid of ids) {
+      emitMention({ recipient: rid, title: `${memberById.get(userId)?.name || "Someone"} mentioned you`, body: body.slice(0, 140), payload: { route: conversation?.room_id ? `/office/r/${conversation.room_id}` : "/messages", room_id: conversation?.room_id || undefined, conversation_id: convId }, entityType: "conversation", entityId: convId });
+    }
+  }, [memberById, userId, conversation, convId]);
   const [messages, setMessages] = useState([]);
   const [reactions, setReactions] = useState(new Map());
   const [attachments, setAttachments] = useState(new Map());
@@ -563,17 +653,7 @@ export function Thread({ conversation, name, memberById, candidates, userId, isA
       setAttachments((prev) => new Map([...prev, ...at]));
     }
     // mentions (only when there's real text)
-    if (body) {
-      const ids = new Set();
-      for (const tok of (body.match(/@([\w]+)/g) || [])) {
-        const nm = tok.slice(1).toLowerCase();
-        const hit = candidates.find((c) => (c.name || "").replace(/\s+/g, "").toLowerCase() === nm);
-        if (hit && hit.user_id !== userId) ids.add(hit.user_id);
-      }
-      for (const rid of ids) {
-        emitMention({ recipient: rid, title: `${memberById.get(userId)?.name || "Someone"} mentioned you`, body: body.slice(0, 140), payload: { route: conversation?.room_id ? `/office/r/${conversation.room_id}` : "/messages", room_id: conversation?.room_id || undefined, conversation_id: convId }, entityType: "conversation", entityId: convId });
-      }
-    }
+    if (body) pingMentions(mentionIdsIn(body), body);
   };
 
   const onToggleReaction = async (messageId, glyph, mine) => {
@@ -585,8 +665,14 @@ export function Thread({ conversation, name, memberById, candidates, userId, isA
   const saveEdit = async (messageId) => {
     const body = editDraft.trim();
     if (!body) { setEditing(null); return; }
+    const prevBody = messages.find((m) => m.id === messageId)?.body || "";
     const { message } = await editMessage(messageId, body);
-    if (message) setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, body: message.body, edited_at: message.edited_at } : m)));
+    if (message) {
+      setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, body: message.body, edited_at: message.edited_at } : m)));
+      // Ping only teammates the edit NEWLY mentions — not those already tagged.
+      const before = mentionIdsIn(prevBody);
+      pingMentions(new Set([...mentionIdsIn(body)].filter((id) => !before.has(id))), body);
+    }
     setEditing(null);
   };
   const onDelete = async (messageId) => {
@@ -669,8 +755,18 @@ export function Thread({ conversation, name, memberById, candidates, userId, isA
                   )}
                   {editing === m.id ? (
                     <div className="flex flex-col gap-1.5 mt-1">
-                      <textarea value={editDraft} onChange={(e) => setEditDraft(e.target.value)} rows={2}
-                        className={`rounded-lg border px-2.5 py-1.5 text-sm ${dark ? "bg-[var(--color-surface-raised)] border-[var(--color-border)] text-slate-100" : "bg-white border-slate-200 text-slate-800"}`} />
+                      <MentionField
+                        value={editDraft}
+                        onChange={setEditDraft}
+                        candidates={candidates}
+                        onSubmit={() => saveEdit(m.id)}
+                        onCancel={() => setEditing(null)}
+                        onTyping={signalTyping}
+                        autoFocus
+                        dark={dark}
+                        rows={2}
+                        className={`w-full resize-none rounded-lg border px-2.5 py-1.5 text-sm outline-none max-h-40 ${dark ? "bg-[var(--color-surface-raised)] border-[var(--color-border)] text-slate-100" : "bg-white border-slate-200 text-slate-800"}`}
+                      />
                       <div className="flex gap-3 text-[12px]">
                         <button onClick={() => saveEdit(m.id)} className="font-semibold text-[var(--color-accent)] py-2 sm:py-0">Save</button>
                         <button onClick={() => setEditing(null)} className="text-slate-400 py-2 sm:py-0">Cancel</button>
