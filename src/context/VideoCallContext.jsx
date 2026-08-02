@@ -29,6 +29,13 @@ const VideoCallContext = createContext(null);
 const ACTIVE_CALL_KEY = "ql_active_call";
 const RESTORE_MAX_AGE_MS = 30 * 60 * 1000; // don't rejoin a stale/abandoned call
 
+// In-session auto-rejoin (a mid-call media drop). Bounded so a genuinely-down
+// room can't reconnect-storm: exponential backoff, capped tries per outage. The
+// counter resets whenever a call sticks (becomes active) or connectivity returns.
+const AUTO_REJOIN_MAX_TRIES = 5;
+const AUTO_REJOIN_BASE_DELAY_MS = 1000; // 1s, 2s, 4s, 8s, 16s …
+const AUTO_REJOIN_MAX_DELAY_MS = 30 * 1000;
+
 function persistActiveCall(c) {
   try {
     if (!c?.roomId) return;
@@ -91,6 +98,69 @@ export function VideoCallProvider({ children }) {
   const callRef = useRef(null);
   callRef.current = call;
 
+  // ── In-session auto-rejoin ──────────────────────────────────────────────
+  // The persisted `ql_active_call` marker was only read at MOUNT, so a mid-
+  // session media drop (network blip / LiveKit reconnect that gives up) left the
+  // user stranded until a reload. This watcher rejoins in-session: on an
+  // involuntary drop, and on `online` / becoming visible, if a fresh marker
+  // still exists (a user leave / kick cleared it) and no call is active, it
+  // restarts the call — camera-off + mic-muted, matching loadPersistedActiveCall.
+  const rejoinTimerRef = useRef(null);
+  const rejoinTriesRef = useRef(0);
+  const clearRejoinTimer = () => {
+    if (rejoinTimerRef.current) { clearTimeout(rejoinTimerRef.current); rejoinTimerRef.current = null; }
+  };
+  // Ref-held so the stable (deps-free) callbacks + event listeners always call
+  // the latest closure (which reads the current startCall) without re-binding.
+  const attemptRejoinRef = useRef(null);
+  attemptRejoinRef.current = (trigger) => {
+    if (callRef.current) { rejoinTriesRef.current = 0; return; } // already back
+    // A hidden tab throttles timers and can't usefully connect media — wait for
+    // it to foreground (the visibilitychange listener re-attempts then).
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+    const restore = loadPersistedActiveCall(); // null → user left / kicked / stale
+    if (!restore) { rejoinTriesRef.current = 0; clearRejoinTimer(); return; }
+    if (rejoinTriesRef.current >= AUTO_REJOIN_MAX_TRIES) return;
+    rejoinTriesRef.current += 1;
+    logCallEvent("auto-rejoin", { roomId: restore.roomId, trigger, attempt: rejoinTriesRef.current });
+    startCall(restore.roomId, restore.displayName, {
+      mode: restore.mode,
+      choices: restore.choices,
+      listen: restore.listen,
+    });
+  };
+  const scheduleRejoinRef = useRef(null);
+  scheduleRejoinRef.current = (trigger) => {
+    if (rejoinTimerRef.current || callRef.current) return;
+    if (rejoinTriesRef.current >= AUTO_REJOIN_MAX_TRIES) return;
+    if (!loadPersistedActiveCall()) return; // nothing (recoverable) to rejoin
+    const delay = Math.min(AUTO_REJOIN_MAX_DELAY_MS, AUTO_REJOIN_BASE_DELAY_MS * 2 ** rejoinTriesRef.current);
+    rejoinTimerRef.current = setTimeout(() => {
+      rejoinTimerRef.current = null;
+      attemptRejoinRef.current?.(trigger);
+    }, delay);
+  };
+
+  // A call became active → the reconnect (or fresh join) stuck; reset the budget.
+  useEffect(() => {
+    if (call) { rejoinTriesRef.current = 0; clearRejoinTimer(); }
+  }, [call]);
+
+  // Rejoin on connectivity/foreground recovery. `online` gets a fresh try budget
+  // (a new outage deserves the full backoff ladder). Cleared on unmount so a
+  // pending timer never fires into a torn-down (logged-out) provider.
+  useEffect(() => {
+    const onOnline = () => { rejoinTriesRef.current = 0; attemptRejoinRef.current?.("online"); };
+    const onVisible = () => { if (document.visibilityState === "visible") attemptRejoinRef.current?.("visible"); };
+    window.addEventListener("online", onOnline);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("online", onOnline);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, []);
+  useEffect(() => () => clearRejoinTimer(), []);
+
   // If we mounted with a restored call (auth-loss → re-login rejoin), leave a
   // breadcrumb so the reconnect is distinguishable from a fresh user-initiated
   // join in the call diagnostics.
@@ -134,16 +204,22 @@ export function VideoCallProvider({ children }) {
   const endCall = useCallback((reason) => {
     const prev = callRef.current;
     if (prev) logCallEvent("end", { roomId: prev.roomId, reason: reason || "unspecified" });
-    // A DELIBERATE end (user leaves, room cleared) clears the auto-rejoin marker.
-    // "livekit-disconnected" is a transient drop — and it also fires when the tree
-    // unmounts on logout — so it must NOT clear the marker, or a recovered login
-    // couldn't rejoin. (A bare unmount never calls endCall at all.)
-    if (reason !== "livekit-disconnected") clearPersistedActiveCall();
+    // A DELIBERATE or TERMINAL end (user leaves, room cleared, kicked, duplicate
+    // identity — all tagged ≠ "livekit-disconnected") clears the auto-rejoin
+    // marker so we don't fight it. "livekit-disconnected" is a recoverable
+    // transient drop — and it also fires when the tree unmounts on logout — so it
+    // must NOT clear the marker, or a recovered login / the watcher couldn't
+    // rejoin. (A bare unmount never calls endCall at all.)
+    const recoverable = reason === "livekit-disconnected";
+    if (!recoverable) clearPersistedActiveCall();
     setCall(null);
     setStageElRaw(null);
     setPoppedOut(false);
     setMaximized(false);
     setHideChrome(false);
+    // Involuntary drop with the marker intact → kick off the bounded, backoff
+    // auto-rejoin (reconnects camera-off + mic-muted via loadPersistedActiveCall).
+    if (recoverable) scheduleRejoinRef.current?.("dropped");
   }, []);
 
   // Patch the live call without re-creating it — used to flip a spectator

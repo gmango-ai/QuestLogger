@@ -73,6 +73,7 @@ import {
   setWhiteboardTitle,
   archiveWhiteboard,
   saveWhiteboardThumbnail,
+  uploadWhiteboardThumbnail,
   TEMPLATES,
 } from "../lib/whiteboard";
 import {
@@ -660,7 +661,7 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
   const applyPaintOpsRef = useRef(null);
   const onPaintPatch = useCallback((ops) => applyPaintOpsRef.current?.(ops, false), []);
 
-  const { peers, members, viewports, pushCursor, pushViewport, pushPaint, pushPaintPatch, myColor } = useWhiteboardSync({
+  const { peers, members, viewports, pushCursor, pushViewport, pushPaint, pushPaintPatch, myColor, isPersister } = useWhiteboardSync({
     boardId: board?.id,
     enabled: collabEnabled,
     nodes,
@@ -1401,6 +1402,9 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
     nodes, edges, setNodes, setEdges,
     board, setBoard, loading, setLoading, setError, setSaveState,
     setTitleDraft, setGoalDraft, readOnly,
+    // Only the elected persister writes to the DB; co-editors sync live over
+    // broadcast. Collapses N concurrent full-board writes into one write stream.
+    canPersist: isPersister,
     onSaved: () => scheduleThumbnailRef.current?.(),
   });
 
@@ -2578,9 +2582,11 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
     const zoom = Math.min(1, 320 / Math.max(bounds.width, bounds.height));
     const w = Math.ceil(bounds.width * zoom + pad * 2);
     const h = Math.ceil(bounds.height * zoom + pad * 2);
+    const uid = session?.user?.id;
+    if (!uid) return;
     try {
-      const { toJpeg } = await import("html-to-image");
-      const dataUrl = await toJpeg(el, {
+      const { toBlob } = await import("html-to-image");
+      const blob = await toBlob(el, {
         backgroundColor: dark ? "#0f172a" : "#fbf6ee",
         width: w, height: h, pixelRatio: 1, cacheBust: true, quality: 0.7,
         style: {
@@ -2588,12 +2594,15 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
           transform: `translate(${pad - bounds.x * zoom}px, ${pad - bounds.y * zoom}px) scale(${zoom})`,
         },
       });
-      // Guard against a pathologically dense board bloating the row (and every
-      // list query that pulls thumbnails). ~120KB of data URL is plenty for a
-      // 320px preview; skip the write past that and keep the icon fallback.
-      if (dataUrl.length > 120_000) return;
-      await saveWhiteboardThumbnail(board.id, dataUrl);
-      setBoard((b) => (b ? { ...b, thumbnail: dataUrl } : b));
+      if (!blob) return;
+      // Upload the preview to Storage (NOT a base64 column on the hot row) so the
+      // snapshot PATCH stays cheap. Persist only the short URL, cache-busted so
+      // list cards pick up the new preview.
+      const { url, error: upErr } = await uploadWhiteboardThumbnail(board.id, blob, uid);
+      if (upErr || !url) return;
+      const busted = `${url}?v=${Date.now()}`;
+      await saveWhiteboardThumbnail(board.id, busted);
+      setBoard((b) => (b ? { ...b, thumbnail: busted } : b));
     } catch { /* best-effort */ }
   }, [readOnly, embedded, board?.id, board?.scope, board?.owner_id, session?.user?.id, rf, dark]);
   const scheduleThumbnail = useCallback(() => {

@@ -4,11 +4,33 @@ import { Car, Maximize2, PhoneOff, PictureInPicture2, X } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useVideoCall } from "../../context/VideoCallContext";
 import { useSyncSession } from "../../context/SyncSessionContext";
+import { useApp } from "../../context/AppContext";
 import { useTheme } from "../../context/ThemeContext";
 import { cloneDocStyles, copyRootCustomProps } from "../pomodoro/PomodoroPipParts";
-import { audioMediaSnapshot, logAudioEvent } from "./livekitDiagnostics";
+import { audioMediaSnapshot, logAudioEvent, logCallEvent } from "./livekitDiagnostics";
 import { getAudioContext } from "../../lib/audioContext";
+import { createSyncSession } from "../../lib/syncSession";
 import VideoCall from "./VideoCall";
+
+// LiveKit disconnect reasons (human names from LiveKitCall's onDisconnected)
+// that are TERMINAL — the call must NOT auto-rejoin after them. A plain network
+// / transient drop maps to "livekit-disconnected", which keeps the auto-rejoin
+// marker so VideoCallContext's watcher can reconnect. These clear it.
+const LK_TERMINAL_DISCONNECTS = new Set([
+  "client_initiated",    // user hit Leave in the call control bar
+  "duplicate_identity",  // signed in elsewhere — that session wins, don't fight it
+  "participant_removed", // moderation kick
+  "room_deleted",
+  "room_closed",
+  "user_rejected",
+]);
+// Map a LiveKit disconnect reason to the endCall reason. Terminal reasons get a
+// distinct tag (≠ "livekit-disconnected") so endCall clears the rejoin marker;
+// everything else stays "livekit-disconnected" (recoverable → eligible to
+// auto-rejoin, and the string that also fires on a logout unmount).
+function endReasonForDisconnect(reason) {
+  return LK_TERMINAL_DISCONNECTS.has(reason) ? `livekit-${reason}` : "livekit-disconnected";
+}
 
 // Re-parenting the call host — between the page stage, the floating PiP, and the
 // Document-PiP window — pauses its media elements. Crucially that includes the
@@ -73,7 +95,8 @@ const MAX_CSS =
 
 export default function PersistentVideoCall() {
   const { call, startCall, endCall, updateCall, stageEl, poppedOut, setPoppedOut, setCanPopOut, registerPopout, maximized, hideChrome } = useVideoCall();
-  const { syncSession } = useSyncSession();
+  const { syncSession, joinSession } = useSyncSession();
+  const { session } = useApp();
   const { theme } = useTheme();
   const dark = theme === "dark";
   const navigate = useNavigate();
@@ -134,11 +157,69 @@ export default function PersistentVideoCall() {
   }, []);
   const compact = inPiP || small;
 
+  // Whether the LiveKit media is actually connected — set from the call host's
+  // onJoined / onLeft (which bubble from LiveKitCall's onConnected /
+  // onDisconnected). This is the "is media healthy?" signal the carry-over effect
+  // needs: a transient reconnect keeps this true (LiveKit fires Reconnected, not
+  // Disconnected), so it only flips false on a genuine terminal drop.
+  const connectedRef = useRef(false);
+
+  // Last-known metadata of a live sync session — captured while syncSession is
+  // truthy so we can re-create the row (with the right team + visibility) if it
+  // vanishes out from under a still-connected call. Ref-updated during render
+  // (same pattern as callRef in VideoCallContext) so it's always current without
+  // re-firing effects.
+  const lastSessionMetaRef = useRef(null);
+  if (syncSession?.room_id) {
+    lastSessionMetaRef.current = {
+      roomId: syncSession.room_id,
+      teamId: syncSession.team_id ?? null,
+      visibility: syncSession.visibility ?? null,
+    };
+  }
+
+  // Re-establish the sync-session row for the room we're still connected to,
+  // after the row vanished (a DB brownout / a false-positive sweep) while the
+  // LiveKit media stayed up. Idempotent: start_or_join_room_session (via
+  // createSyncSession) reconciles + find-or-creates under a per-room advisory
+  // lock, so it JOINs an existing row or creates a fresh one. Kept in a ref so
+  // the carry-over effect can call the latest closure without taking these as
+  // deps. Best-effort: on failure we log and leave the call up — the session
+  // machinery (rehydrate/realtime) keeps trying — rather than ending the call.
+  const reestablishInFlightRef = useRef(false);
+  const reestablishRef = useRef(null);
+  reestablishRef.current = async () => {
+    const c = call;
+    if (!c?.roomId || reestablishInFlightRef.current) return;
+    reestablishInFlightRef.current = true;
+    logCallEvent("session-reestablish", { roomId: c.roomId });
+    try {
+      const meta = lastSessionMetaRef.current;
+      const { data, error } = await createSyncSession(session?.user?.id, c.displayName, {
+        teamId: meta?.teamId ?? null,
+        roomId: c.roomId,
+        visibility: meta?.visibility ?? "team",
+      });
+      if (!error && data) joinSession(data);
+      else console.warn(`[call] sync-session re-establish failed (room ${c.roomId}):`, error?.message || "no data returned");
+    } catch (e) {
+      console.warn(`[call] sync-session re-establish threw (room ${c.roomId}):`, e?.message || e);
+    } finally {
+      reestablishInFlightRef.current = false;
+    }
+  };
+
   // Bind the call's lifetime to the room's sync session, and handle carry-over:
   // when you move from one room to another while in a call, the call FOLLOWS you
   // (re-joins the new room) rather than ending — the only "auto-join" path.
-  // Leaving to the hallway (curRoom null) tears the call down. A fresh entry from
-  // the hallway with no active call shows the pre-join card (see RoomVideoStage).
+  //
+  // The session row VANISHING (curRoom null) is NOT the same as a real exit. A
+  // DB/network hiccup can null syncSession (a timed-out query, or a false-
+  // positive sweep) while the LiveKit media is perfectly healthy — the old code
+  // tore the whole call down here, ejecting the team. So: if media is still
+  // connected we treat the vanished row as advisory and re-establish it instead
+  // of ending. A genuine exit ends the call through the explicit user-leave paths
+  // or LiveKit's onDisconnected (onLeft), never from here-while-connected.
   const prevSessionRoomRef = useRef(syncSession?.room_id || null);
   useEffect(() => {
     const prevRoom = prevSessionRoomRef.current;
@@ -147,10 +228,13 @@ export default function PersistentVideoCall() {
     if (call && prevRoom && curRoom !== prevRoom && call.roomId === prevRoom) {
       if (curRoom) {
         startCall(curRoom, call.displayName, { mode: call.mode, choices: call.choices, listen: call.listen });
+      } else if (connectedRef.current) {
+        // Media still up → the row vanished under a stationary call (brownout /
+        // sweep), not a real exit. Keep the call; re-establish the session row.
+        reestablishRef.current?.();
       } else {
-        // The sync session lost its room (left to the hallway, or the room reset
-        // out from under us). This is the prime app-layer "force disconnect"
-        // suspect — tag it so it's unmistakable in the log.
+        // Media is also gone (LiveKit already down) → this is a genuine teardown.
+        // Tag it so it's unmistakable in the log.
         endCall("sync-session-room-cleared");
       }
     }
@@ -269,7 +353,12 @@ export default function PersistentVideoCall() {
         // Join / Watch / settings. Avoids two stacked bottom bars.
         chromeless={call.mode === "spectate"}
         onJoinIn={() => updateCall({ mode: "join" })}
-        onLeft={() => endCall("livekit-disconnected")}
+        onJoined={() => { connectedRef.current = true; }}
+        // A genuine LiveKit disconnect (or explicit Leave) is the ONLY media-side
+        // teardown. Forward the reason so a terminal drop (kick / duplicate /
+        // room gone) clears the rejoin marker while a plain network drop keeps it
+        // (→ VideoCallContext's watcher reconnects).
+        onLeft={(reason) => { connectedRef.current = false; endCall(endReasonForDisconnect(reason)); }}
       />
 
       {/* In-app PiP chrome: a thin header with back-to-room + leave. (Pop-out
