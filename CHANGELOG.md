@@ -4,6 +4,25 @@ Notable changes to Mangodoro. Pre-1.0, so grouped by date/area rather than
 semantic versions. Newest first. Each release lists **New & improved** (features
 and changes to features) and **Fixes**.
 
+## 2026-08-02
+
+### New & improved
+
+- **chore** — commit in-flight UI work (weather, world clock, messages, office)
+- feat(whiteboards): clickable cards + preview thumbnails
+- feat(whiteboards): invite-only sharing + public boards + scope settings
+- feat(calendar): "Find a time" scheduler + always-present Google reconnect
+- feat(rooms): meeting auto-close warning + extend, ephemeral chat, modal overflow fix
+
+### Fixes
+
+- (whiteboard,calls): harden realtime whiteboard + make calls survive DB brownouts
+- (auth): safer auto-rejoin + a reconnecting indicator
+- (audio): harden + simplify the LiveKit audio pipeline
+- (auth): survive transient token-refresh failures without ejecting the call
+- (kiosk): grid holds order; only surface an off-screen speaker
+- (identity): seed name/avatar from Google OAuth metadata
+
 ## 2026-07-25
 
 ### New & improved
