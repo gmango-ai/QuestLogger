@@ -98,7 +98,10 @@ export default function VideoCall({ roomId, displayName, compact, publish, liste
         effective_type: report?.env?.effectiveType ?? null,
       });
     }
-    onLeft?.();
+    // Forward the human-readable disconnect reason (+ report) so the call host
+    // can tell a terminal drop (kick / duplicate identity / room gone) from a
+    // recoverable network drop and decide whether to auto-rejoin.
+    onLeft?.(reason, report);
   };
 
   const handleError = (message) => {

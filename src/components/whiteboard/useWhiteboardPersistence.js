@@ -9,7 +9,17 @@ import { declampNodes } from "./frame";
 import { ensureGoogleFont } from "../../lib/whiteboardFonts";
 import { loadViewport } from "./wbStorage";
 
-const SAVE_DEBOUNCE_MS = 1200;
+// Live collaboration is delivered over the realtime BROADCAST channel, so the DB
+// write is only a durability CHECKPOINT (for cold-load when no peers are present)
+// — it does not need to fire per edit-burst. Save on a longer idle debounce, with
+// a hard max-wait so a long continuous session still checkpoints.
+const SAVE_DEBOUNCE_MS = 4000;
+const MAX_SAVE_WAIT_MS = 15000;
+// On save failure, back off (capped) instead of re-sending the whole board on the
+// next keystroke — that self-sustaining re-send is what turned a slow write into
+// a storm during the retro.
+const BASE_BACKOFF_MS = 1000;
+const MAX_BACKOFF_MS = 30000;
 
 // Board lifecycle persistence for the whiteboard editor, extracted from
 // WhiteboardPage.jsx: load metadata + snapshot (seeding a template when empty),
@@ -21,10 +31,24 @@ export function useWhiteboardPersistence({
   nodes, edges, setNodes, setEdges,
   board, setBoard, loading, setLoading, setError, setSaveState,
   setTitleDraft, setGoalDraft, readOnly = false, onSaved,
+  // Single-writer election (from useWhiteboardSync): only the elected persister
+  // writes the board to the DB; everyone else edits live over broadcast and
+  // relies on the persister for durability. Defaults true so a non-synced /
+  // solo / embedded board always persists.
+  canPersist = true,
 }) {
   const lastSavedRef = useRef("");
   const saveTimerRef = useRef(null);
   const seededRef = useRef(false);
+  // Cadence + backoff bookkeeping.
+  const pendingSinceRef = useRef(0);   // when the current unsaved run began (for max-wait)
+  const backoffUntilRef = useRef(0);   // don't attempt a save before this time
+  const failuresRef = useRef(0);
+  // Live state read by the (possibly delayed / retry) save timer so it never
+  // writes stale data regardless of which render's closure fires it.
+  const nodesRef = useRef(nodes); nodesRef.current = nodes;
+  const edgesRef = useRef(edges); edgesRef.current = edges;
+  const canPersistRef = useRef(canPersist); canPersistRef.current = canPersist;
 
   // ── load board metadata + snapshot, seed template if empty ──
   useEffect(() => {
@@ -89,38 +113,71 @@ export function useWhiteboardPersistence({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [boardId]);
 
-  // ── debounced save on every node / edge change ──
-  // We collapse rapid edits into a single network call. The save is
-  // gated on the serialized snapshot diff so things like cursor moves
-  // that don't change state don't burn writes.
+  // ── single-writer, idle-checkpointed save ──
+  // Only the elected persister writes to the DB; everyone else's edits are already
+  // shared live over broadcast, so N concurrent editors cost one write stream, not
+  // N full-board writes (the retro-brownout fix). The persister saves on an idle
+  // debounce with a max-wait ceiling, and backs off on failure instead of
+  // re-sending the whole board on the next keystroke.
+  //
+  // Reads live state from refs so a delayed / retry timer never writes stale data.
   useEffect(() => {
-    if (readOnly) return; // read-only viewers never write
-    if (!board?.id) return;
-    if (loading) return;
-    setSaveState("dirty");
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = setTimeout(async () => {
-      const snap = { nodes, edges };
+    if (readOnly || !board?.id || loading) return undefined;
+
+    // Not the persister: our edits propagate live via broadcast and the persister
+    // durably saves them — issue ZERO DB writes here.
+    if (!canPersist) {
+      if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
+      pendingSinceRef.current = 0;
+      setSaveState("saved");
+      return undefined;
+    }
+
+    async function flushSave() {
+      saveTimerRef.current = null;
+      if (readOnly || !board?.id || !canPersistRef.current) return;
+      const snap = { nodes: nodesRef.current, edges: edgesRef.current };
       const serialized = JSON.stringify(snap);
       if (serialized === lastSavedRef.current) {
+        pendingSinceRef.current = 0;
         setSaveState("saved");
         return;
       }
       setSaveState("saving");
       const { error: err } = await saveSnapshot(board.id, snap);
       if (err) {
-        setError(err.message || "Couldn't save changes.");
+        failuresRef.current = Math.min(failuresRef.current + 1, 12);
+        backoffUntilRef.current = Date.now() + Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * 2 ** failuresRef.current);
         setSaveState("dirty");
+        setError(err.message || "Couldn't save changes — retrying…");
+        scheduleSave(); // keep pendingSinceRef so the max-wait ceiling still applies
         return;
       }
+      failuresRef.current = 0;
+      backoffUntilRef.current = 0;
+      pendingSinceRef.current = 0;
       lastSavedRef.current = serialized;
       setSaveState("saved");
       onSaved?.(); // a real change landed → let the editor refresh the thumbnail
-    }, SAVE_DEBOUNCE_MS);
-    return () => {
+    }
+
+    function scheduleSave() {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+      const now = Date.now();
+      if (!pendingSinceRef.current) pendingSinceRef.current = now;
+      const saveAt = Math.max(
+        Math.min(now + SAVE_DEBOUNCE_MS, pendingSinceRef.current + MAX_SAVE_WAIT_MS),
+        backoffUntilRef.current,
+      );
+      saveTimerRef.current = setTimeout(flushSave, Math.max(0, saveAt - now));
+    }
+
+    setSaveState("dirty");
+    scheduleSave();
+    return () => {
+      if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
     };
-  }, [nodes, edges, board?.id, loading]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [nodes, edges, board?.id, loading, canPersist]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load every Google font in use (including fonts that arrive from peers via
   // sync). ensureGoogleFont is idempotent and a no-op for the built-in presets.
@@ -128,14 +185,17 @@ export function useWhiteboardPersistence({
     for (const n of nodes) ensureGoogleFont(n.data?.fontFamily);
   }, [nodes]);
 
-  // Flush pending edits on unmount / tab close.
+  // Flush pending edits on unmount / tab close — persister only. This also covers
+  // the "last participant leaves" case: whoever is the persister at that moment
+  // writes the final state (a new persister that just took over on handoff will
+  // have re-checkpointed via the save effect above). Reads refs so it always
+  // flushes the latest state.
   useEffect(() => {
     if (readOnly) return undefined;
     function flush() {
-      if (!saveTimerRef.current || !board?.id) return;
-      clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = null;
-      const snap = { nodes, edges };
+      if (!canPersistRef.current || !board?.id) return;
+      if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
+      const snap = { nodes: nodesRef.current, edges: edgesRef.current };
       const serialized = JSON.stringify(snap);
       if (serialized === lastSavedRef.current) return;
       saveSnapshot(board.id, snap);
@@ -146,5 +206,5 @@ export function useWhiteboardPersistence({
       window.removeEventListener("beforeunload", flush);
       flush();
     };
-  }, [board?.id, nodes, edges]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [board?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 }

@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Globe, Pin, PinOff, Plus, X } from "lucide-react";
+import { Globe, Pin, Plus, X } from "lucide-react";
 import { useApp } from "../context/AppContext";
 import { useTeam } from "../context/TeamContext";
 import Popover from "./goals/Popover";
-import { ClockRow, CityTimezonePicker } from "./worldclock/clockShared";
+import { ClockRow, CityTimezonePicker, PinnedClockHero } from "./worldclock/clockShared";
 import { getWorldClockLocations, cityFromZone } from "../lib/worldClock";
 import { localTimeLabel } from "../lib/timezone";
 
@@ -57,6 +57,9 @@ export default function WorldClockNav({ dark }) {
     if (!pinnedTz) return "";
     return rows.find((r) => r.tz === pinnedTz)?.label || cityFromZone(pinnedTz);
   }, [pinnedTz, rows]);
+
+  // The pinned zone is featured in the hero, so the plain list shows the rest.
+  const otherRows = useMemo(() => rows.filter((r) => r.tz !== pinnedTz), [rows, pinnedTz]);
 
   const pin = (tz) => updateSettingsField({ navPinnedTz: tz });
   const unpin = () => updateSettingsField({ navPinnedTz: "" });
@@ -115,51 +118,52 @@ export default function WorldClockNav({ dark }) {
           </div>
         )}
 
-        {rows.length > 0 ? (
+        {pinnedTz && (
+          <div className="px-1.5 pb-1.5">
+            <PinnedClockHero tz={pinnedTz} label={pinnedLabel} dark={dark} onUnpin={unpin} />
+          </div>
+        )}
+
+        {otherRows.length > 0 ? (
           <ul className="px-1">
-            {rows.map((row) => {
-              const isPinned = row.tz === pinnedTz;
-              return (
-                <ClockRow
-                  key={row.id || row.tz}
-                  loc={row}
-                  dark={dark}
-                  trailing={
-                    <div className="flex items-center gap-0.5 shrink-0 pl-0.5">
+            {otherRows.map((row) => (
+              <ClockRow
+                key={row.id || row.tz}
+                loc={row}
+                dark={dark}
+                trailing={
+                  <div className="flex items-center gap-0.5 shrink-0 pl-0.5">
+                    <button
+                      type="button"
+                      onClick={() => pin(row.tz)}
+                      title="Pin this time to the nav"
+                      aria-pressed={false}
+                      className={`p-2 sm:p-1 rounded ${
+                        dark ? "text-slate-500 hover:text-slate-200 hover:bg-white/5" : "text-slate-400 hover:text-slate-700 hover:bg-slate-100"
+                      }`}
+                    >
+                      <Pin className="w-4 h-4 sm:w-3.5 sm:h-3.5" />
+                    </button>
+                    {row.personal && (
                       <button
                         type="button"
-                        onClick={() => (isPinned ? unpin() : pin(row.tz))}
-                        title={isPinned ? "Unpin from nav" : "Pin this time to the nav"}
-                        aria-pressed={isPinned}
-                        className={`p-2 sm:p-1 rounded ${
-                          isPinned
-                            ? "text-[var(--color-accent)]"
-                            : dark ? "text-slate-500 hover:text-slate-200 hover:bg-white/5" : "text-slate-400 hover:text-slate-700 hover:bg-slate-100"
-                        }`}
+                        onClick={() => removePersonal(row.id)}
+                        title="Remove"
+                        className={`p-2 sm:p-1 rounded ${dark ? "text-slate-500 hover:text-rose-400 hover:bg-white/5" : "text-slate-400 hover:text-rose-500 hover:bg-slate-100"}`}
                       >
-                        {isPinned ? <PinOff className="w-4 h-4 sm:w-3.5 sm:h-3.5" /> : <Pin className="w-4 h-4 sm:w-3.5 sm:h-3.5" />}
+                        <X className="w-4 h-4 sm:w-3.5 sm:h-3.5" />
                       </button>
-                      {row.personal && (
-                        <button
-                          type="button"
-                          onClick={() => removePersonal(row.id)}
-                          title="Remove"
-                          className={`p-2 sm:p-1 rounded ${dark ? "text-slate-500 hover:text-rose-400 hover:bg-white/5" : "text-slate-400 hover:text-rose-500 hover:bg-slate-100"}`}
-                        >
-                          <X className="w-4 h-4 sm:w-3.5 sm:h-3.5" />
-                        </button>
-                      )}
-                    </div>
-                  }
-                />
-              );
-            })}
+                    )}
+                  </div>
+                }
+              />
+            ))}
           </ul>
-        ) : (
+        ) : !pinnedTz ? (
           <div className={`px-2 py-2 text-[11px] leading-snug ${dark ? "text-slate-500" : "text-slate-500"}`}>
             No times yet. Use <span className="font-medium">Add</span> to pin a city, or an admin can add the org's locations in the office World Clock.
           </div>
-        )}
+        ) : null}
       </Popover>
     </>
   );

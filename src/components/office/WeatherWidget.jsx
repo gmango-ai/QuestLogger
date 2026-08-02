@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   Sun, Moon, CloudSun, CloudMoon, Cloud, CloudFog, CloudDrizzle, CloudRain, CloudSnow, CloudLightning,
-  MapPin, Search, Loader2, LocateFixed, Pencil,
+  MapPin, Search, Loader2, LocateFixed, Settings2, Star, X,
 } from "lucide-react";
 import { geocodeCity, fetchWeather, weatherInfo } from "../../lib/weather";
 import { useVisibilityPausedInterval } from "../../hooks/useVisibilityPausedInterval";
@@ -16,27 +16,37 @@ export const WEATHER_ICONS = {
 
 const KEY = "ql_weather";
 const SYNC_EVENT = "mango:weather-cfg";
+const locKey = (l) => `${l.lat},${l.lon}`;
 
+function normUnit(u) { return u === "celsius" ? "celsius" : "fahrenheit"; }
+function normLoc(l) {
+  if (!l || l.lat == null || l.lon == null) return null;
+  return { name: l.name || "", lat: l.lat, lon: l.lon };
+}
 function loadCfg() {
   try {
-    const c = JSON.parse(localStorage.getItem(KEY) || "null");
-    if (c && typeof c === "object") return { name: c.name || "", lat: c.lat ?? null, lon: c.lon ?? null, unit: c.unit === "celsius" ? "celsius" : "fahrenheit" };
+    const v = JSON.parse(localStorage.getItem(KEY) || "null");
+    if (v && Array.isArray(v.locations)) return { locations: v.locations.map(normLoc).filter(Boolean), unit: normUnit(v.unit) };
+    if (v && v.lat != null) return { locations: [{ name: v.name || "", lat: v.lat, lon: v.lon }], unit: normUnit(v.unit) }; // migrate old single-city
   } catch { /* */ }
-  return { name: "", lat: null, lon: null, unit: "fahrenheit" };
+  return { locations: [], unit: "fahrenheit" };
 }
 function saveCfg(c) {
   try { localStorage.setItem(KEY, JSON.stringify(c)); } catch { /* */ }
   try { window.dispatchEvent(new CustomEvent(SYNC_EVENT)); } catch { /* */ }
 }
 
-// Weather config + live data. Config (city + unit) is per-device (localStorage);
-// a custom event keeps the card + the strip chip in sync when the city changes.
-// Refetches every 20 min (paused when the tab is hidden).
+// Weather config + live data. Config (a list of cities + unit) is per-device
+// (localStorage); a custom event keeps the card + the strip chip in sync when it
+// changes. The FIRST location is the "primary" (featured big); the rest ride
+// under it as compact cards. Refetches every 20 min (paused when tab hidden).
 export function useWeather() {
   const [cfg, setCfg] = useState(loadCfg);
-  const [data, setData] = useState(null);
+  const [wx, setWx] = useState({}); // locKey → weather data
   const [err, setErr] = useState(false);
-  const hasPlace = cfg.lat != null;
+  const { locations, unit } = cfg;
+  const hasPlace = locations.length > 0;
+  const sig = locations.map(locKey).join("|") + ":" + unit;
 
   // Re-read the shared config when another instance changes it.
   useEffect(() => {
@@ -46,19 +56,46 @@ export function useWeather() {
   }, []);
 
   const reload = useCallback(async () => {
-    if (cfg.lat == null) { setData(null); return; }
-    try { setErr(false); setData(await fetchWeather(cfg.lat, cfg.lon, cfg.unit)); }
-    catch { setErr(true); }
-  }, [cfg.lat, cfg.lon, cfg.unit]);
+    if (!locations.length) { setWx({}); return; }
+    try {
+      setErr(false);
+      const results = {};
+      await Promise.all(locations.map(async (l) => {
+        try { results[locKey(l)] = await fetchWeather(l.lat, l.lon, unit); } catch { /* */ }
+      }));
+      setWx(results);
+    } catch { setErr(true); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sig]);
   useEffect(() => { reload(); }, [reload]);
   useVisibilityPausedInterval(reload, 20 * 60 * 1000, { enabled: hasPlace });
 
-  const setPlace = (p) => setCfg((c) => { const n = { ...c, ...p }; saveCfg(n); return n; });
-  const setUnit = (unit) => setCfg((c) => { const n = { ...c, unit }; saveCfg(n); return n; });
-  return { cfg, data, err, hasPlace, setPlace, setUnit };
+  const mutate = (fn) => setCfg((c) => { const n = fn(c); if (!n) return c; saveCfg(n); return n; });
+  const addPlace = (p) => mutate((c) => {
+    const loc = normLoc(p);
+    if (!loc || c.locations.some((l) => locKey(l) === locKey(loc))) return null;
+    return { ...c, locations: [...c.locations, loc] };
+  });
+  const removePlace = (i) => mutate((c) => ({ ...c, locations: c.locations.filter((_, j) => j !== i) }));
+  const makePrimary = (i) => mutate((c) => {
+    if (i <= 0 || i >= c.locations.length) return null;
+    const arr = c.locations.slice();
+    const [m] = arr.splice(i, 1);
+    arr.unshift(m);
+    return { ...c, locations: arr };
+  });
+  const setUnit = (u) => mutate((c) => ({ ...c, unit: normUnit(u) }));
+
+  const primary = locations[0] || null;
+  return {
+    cfg, wx, err, locations, unit, hasPlace,
+    primary, primaryData: primary ? wx[locKey(primary)] : null,
+    addPlace, removePlace, makePrimary, setUnit,
+  };
 }
 
-// City search / "locate me" — shown when no city is set, or from the edit toggle.
+// City search / "locate me". Clears its own field after a pick so several cities
+// can be added back-to-back (the multi-location manager reuses it).
 function CityPicker({ dark, onPick, onCancel }) {
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState(false);
@@ -70,7 +107,7 @@ function CityPicker({ dark, onPick, onCancel }) {
     setBusy(true); setNotFound(false);
     try {
       const hit = await geocodeCity(q);
-      if (hit) onPick({ name: hit.name, lat: hit.lat, lon: hit.lon });
+      if (hit) { onPick({ name: hit.name, lat: hit.lat, lon: hit.lon }); setQuery(""); }
       else setNotFound(true);
     } catch { setNotFound(true); }
     setBusy(false);
@@ -79,7 +116,7 @@ function CityPicker({ dark, onPick, onCancel }) {
     if (!navigator.geolocation) return;
     setBusy(true);
     navigator.geolocation.getCurrentPosition(
-      (pos) => { onPick({ name: "My location", lat: pos.coords.latitude, lon: pos.coords.longitude }); setBusy(false); },
+      (pos) => { onPick({ name: "My location", lat: pos.coords.latitude, lon: pos.coords.longitude }); setQuery(""); setBusy(false); },
       () => setBusy(false),
       { timeout: 8000 },
     );
@@ -125,84 +162,228 @@ function CityPicker({ dark, onPick, onCancel }) {
   );
 }
 
-// Current conditions + a 3-day forecast for the user's city. Themed for the
-// app (light/dark), unlike the kiosk's white-on-dark panel. Reuses the shared
-// weather lib + icons. Set/change the city inline; toggle °F/°C.
-export default function WeatherWidget({ dark, bare = false }) {
-  const { cfg, data, err, hasPlace, setPlace, setUnit } = useWeather();
-  const [editing, setEditing] = useState(false);
-
+// The featured (primary) location — big icon + temp + condition, feels/wind, and
+// a 3-day forecast. Carries the header controls (unit toggle + manage gear).
+function WeatherHero({ loc, data, unitF, err, dark, onToggleUnit, onEdit }) {
   const cur = data?.current;
   const info = cur ? weatherInfo(cur.weather_code, cur.is_day) : null;
   const Icon = info ? (WEATHER_ICONS[info.kind] || Cloud) : Cloud;
   const daily = data?.daily;
-  const unitF = cfg.unit === "fahrenheit";
-
   const muted = dark ? "text-slate-400" : "text-slate-500";
   const faint = dark ? "text-slate-500" : "text-slate-400";
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className={`inline-flex items-center gap-1 text-[11px] font-semibold truncate min-w-0 ${muted}`}>
+          <MapPin className="w-3 h-3 shrink-0" /> <span className="truncate">{loc.name}</span>
+        </span>
+        <div className="flex items-center gap-0.5 shrink-0">
+          <button
+            type="button"
+            onClick={onToggleUnit}
+            title="Switch units"
+            className={`text-[11px] font-bold px-1.5 py-0.5 rounded ${dark ? "text-slate-400 hover:bg-white/10" : "text-slate-500 hover:bg-slate-100"}`}
+          >
+            °{unitF ? "F" : "C"}
+          </button>
+          <button
+            type="button"
+            onClick={onEdit}
+            aria-label="Manage locations"
+            title="Manage locations"
+            className={`p-1 rounded ${dark ? "text-slate-500 hover:text-slate-300" : "text-slate-400 hover:text-slate-600"}`}
+          >
+            <Settings2 className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </div>
+
+      {!data ? (
+        <p className={`text-xs ${muted}`}>{err ? "Weather unavailable." : "Loading…"}</p>
+      ) : (
+        <>
+          <div className="flex items-center gap-3">
+            <Icon className="w-12 h-12 shrink-0" style={{ color: "var(--color-accent)" }} />
+            <div className="min-w-0">
+              <span className={`block text-4xl font-bold tabular-nums leading-none ${dark ? "text-slate-100" : "text-slate-800"}`}>
+                {Math.round(cur.temperature_2m)}°
+              </span>
+              <span className={`block text-xs mt-1 truncate ${muted}`}>{info.label}</span>
+            </div>
+          </div>
+          <div className={`text-[11px] ${faint}`}>
+            Feels {Math.round(cur.apparent_temperature)}° · Wind {Math.round(cur.wind_speed_10m)} {unitF ? "mph" : "km/h"}
+          </div>
+          {daily?.time?.length > 1 && (
+            <div className="flex items-stretch gap-1.5 pt-0.5">
+              {daily.time.slice(1, 4).map((t, i) => {
+                const di = weatherInfo(daily.weather_code[i + 1], 1);
+                const DIcon = WEATHER_ICONS[di.kind] || Cloud;
+                const day = new Date(`${t}T00:00`).toLocaleDateString([], { weekday: "short" });
+                return (
+                  <div key={t} className={`flex-1 flex flex-col items-center gap-1 rounded-lg py-2 ${dark ? "bg-white/5" : "bg-slate-100"}`}>
+                    <span className={`text-[10px] ${faint}`}>{day}</span>
+                    <DIcon className={`w-5 h-5 ${muted}`} />
+                    <span className={`text-[11px] tabular-nums ${dark ? "text-slate-300" : "text-slate-600"}`}>
+                      {Math.round(daily.temperature_2m_max[i + 1])}°<span className={faint}> {Math.round(daily.temperature_2m_min[i + 1])}°</span>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// A compact card for a secondary location, shown under the hero. Clicking it
+// promotes that city to primary (swaps it into the featured slot).
+function WeatherMini({ loc, data, dark, onClick }) {
+  const cur = data?.current;
+  const info = cur ? weatherInfo(cur.weather_code, cur.is_day) : null;
+  const Icon = info ? (WEATHER_ICONS[info.kind] || Cloud) : Cloud;
+  const daily = data?.daily;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={`Feature ${loc.name}`}
+      className={`w-full flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors ${
+        dark ? "bg-white/5 hover:bg-white/10" : "bg-slate-100 hover:bg-slate-200/70"
+      }`}
+    >
+      <Icon className="w-7 h-7 shrink-0" style={{ color: "var(--color-accent)" }} />
+      <div className="min-w-0 flex-1">
+        <div className={`text-[11px] truncate ${dark ? "text-slate-400" : "text-slate-500"}`}>{loc.name}</div>
+        <div className="flex items-baseline gap-1.5">
+          <span className={`text-xl font-bold tabular-nums leading-none ${dark ? "text-slate-100" : "text-slate-800"}`}>
+            {cur ? Math.round(cur.temperature_2m) : "—"}°
+          </span>
+          <span className={`text-[11px] truncate ${dark ? "text-slate-500" : "text-slate-400"}`}>{info?.label || ""}</span>
+        </div>
+      </div>
+      {daily && (
+        <div className={`text-[11px] tabular-nums shrink-0 ${dark ? "text-slate-400" : "text-slate-500"}`}>
+          {Math.round(daily.temperature_2m_max[0])}°<span className={dark ? "text-slate-600" : "text-slate-400"}> {Math.round(daily.temperature_2m_min[0])}°</span>
+        </div>
+      )}
+    </button>
+  );
+}
+
+// Manage mode — reorder (star = make primary), remove, add cities, pick units.
+function WeatherManager({ dark, locations, unit, onAdd, onRemove, onMakePrimary, onSetUnit, onDone }) {
+  const muted = dark ? "text-slate-400" : "text-slate-500";
+  return (
+    <div className="space-y-2.5">
+      <div className="flex items-center justify-between">
+        <span className={`text-[11px] font-semibold uppercase tracking-wider ${muted}`}>Locations</span>
+        <button type="button" onClick={onDone} className="text-[11px] font-semibold text-[var(--color-accent)] hover:underline">Done</button>
+      </div>
+
+      {locations.length > 0 && (
+        <ul className="space-y-1">
+          {locations.map((l, i) => (
+            <li key={locKey(l)} className={`flex items-center gap-1.5 rounded-lg px-1.5 py-1 ${dark ? "bg-white/5" : "bg-slate-100"}`}>
+              <button
+                type="button"
+                onClick={() => onMakePrimary(i)}
+                disabled={i === 0}
+                title={i === 0 ? "Primary location" : "Make primary"}
+                className={`p-1 rounded shrink-0 ${
+                  i === 0 ? "text-amber-400" : dark ? "text-slate-500 hover:text-amber-400" : "text-slate-400 hover:text-amber-500"
+                }`}
+              >
+                <Star className="w-3.5 h-3.5" fill={i === 0 ? "currentColor" : "none"} />
+              </button>
+              <span className={`flex-1 min-w-0 truncate text-[12px] ${dark ? "text-slate-200" : "text-slate-700"}`}>{l.name || "—"}</span>
+              {i === 0 && <span className={`text-[9px] font-bold uppercase tracking-wide shrink-0 ${muted}`}>Primary</span>}
+              <button
+                type="button"
+                onClick={() => onRemove(i)}
+                aria-label="Remove location"
+                title="Remove"
+                className={`p-1 rounded shrink-0 ${dark ? "text-slate-500 hover:text-rose-400" : "text-slate-400 hover:text-rose-500"}`}
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div>
+        <p className={`text-[10px] font-bold uppercase tracking-wider mb-1 ${dark ? "text-slate-500" : "text-slate-400"}`}>Add a location</p>
+        <CityPicker dark={dark} onPick={onAdd} />
+      </div>
+
+      <div className={`flex items-center justify-between pt-1.5 border-t ${dark ? "border-[var(--color-border)]" : "border-slate-200"}`}>
+        <span className={`text-[11px] ${muted}`}>Units</span>
+        <div className="flex items-center gap-1">
+          {["fahrenheit", "celsius"].map((u) => (
+            <button
+              key={u}
+              type="button"
+              onClick={() => onSetUnit(u)}
+              className={`text-[11px] font-bold px-2 py-0.5 rounded ${
+                unit === u ? "text-white bg-[var(--color-accent)]" : dark ? "text-slate-400 hover:bg-white/10" : "text-slate-500 hover:bg-slate-100"
+              }`}
+            >
+              °{u === "fahrenheit" ? "F" : "C"}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Current conditions for one or many cities. The first (primary) is featured big;
+// any others show as compact cards under it — click one to feature it. Themed for
+// the app (light/dark), unlike the kiosk's white-on-dark panel. Manage the list
+// (add/remove/reorder cities + °F/°C) from the gear.
+export default function WeatherWidget({ dark, bare = false }) {
+  const { wx, err, locations, unit, hasPlace, addPlace, removePlace, makePrimary, setUnit } = useWeather();
+  const [editing, setEditing] = useState(false);
+  const unitF = unit === "fahrenheit";
 
   const body = (
     <div className="space-y-3">
-      {!hasPlace || editing ? (
-        <CityPicker
+      {!hasPlace ? (
+        <div className="space-y-2">
+          <p className={`text-[11px] ${dark ? "text-slate-500" : "text-slate-500"}`}>Add a city to see local weather.</p>
+          <CityPicker dark={dark} onPick={addPlace} />
+        </div>
+      ) : editing ? (
+        <WeatherManager
           dark={dark}
-          onPick={(p) => { setPlace(p); setEditing(false); }}
-          onCancel={hasPlace ? () => setEditing(false) : null}
+          locations={locations}
+          unit={unit}
+          onAdd={addPlace}
+          onRemove={removePlace}
+          onMakePrimary={makePrimary}
+          onSetUnit={setUnit}
+          onDone={() => setEditing(false)}
         />
       ) : (
         <>
-          <div className="flex items-center justify-between gap-2">
-            <span className={`inline-flex items-center gap-1 text-[11px] font-semibold truncate min-w-0 ${muted}`}>
-              <MapPin className="w-3 h-3 shrink-0" /> <span className="truncate">{cfg.name}</span>
-            </span>
-            <button type="button" onClick={() => setEditing(true)} aria-label="Change city" title="Change city" className={`shrink-0 p-1 rounded ${dark ? "text-slate-500 hover:text-slate-300" : "text-slate-400 hover:text-slate-600"}`}>
-              <Pencil className="w-3 h-3" />
-            </button>
-          </div>
-
-          {!data ? (
-            <p className={`text-xs ${muted}`}>{err ? "Weather unavailable." : "Loading…"}</p>
-          ) : (
-            <>
-              <div className="flex items-center gap-3">
-                <Icon className="w-12 h-12 shrink-0" style={{ color: "var(--color-accent)" }} />
-                <div className="min-w-0">
-                  <span className={`block text-4xl font-bold tabular-nums leading-none ${dark ? "text-slate-100" : "text-slate-800"}`}>
-                    {Math.round(cur.temperature_2m)}°
-                  </span>
-                  <span className={`block text-xs mt-1 truncate ${muted}`}>{info.label}</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setUnit(unitF ? "celsius" : "fahrenheit")}
-                  title="Switch units"
-                  className={`ml-auto self-start shrink-0 text-[11px] font-bold px-1.5 py-0.5 rounded ${dark ? "text-slate-400 hover:bg-white/10" : "text-slate-500 hover:bg-slate-100"}`}
-                >
-                  °{unitF ? "F" : "C"}
-                </button>
-              </div>
-              <div className={`text-[11px] ${faint}`}>
-                Feels {Math.round(cur.apparent_temperature)}° · Wind {Math.round(cur.wind_speed_10m)} {unitF ? "mph" : "km/h"}
-              </div>
-              {daily?.time?.length > 1 && (
-                <div className="flex items-stretch gap-1.5 pt-0.5">
-                  {daily.time.slice(1, 4).map((t, i) => {
-                    const di = weatherInfo(daily.weather_code[i + 1], 1);
-                    const DIcon = WEATHER_ICONS[di.kind] || Cloud;
-                    const day = new Date(`${t}T00:00`).toLocaleDateString([], { weekday: "short" });
-                    return (
-                      <div key={t} className={`flex-1 flex flex-col items-center gap-1 rounded-lg py-2 ${dark ? "bg-white/5" : "bg-slate-100"}`}>
-                        <span className={`text-[10px] ${faint}`}>{day}</span>
-                        <DIcon className={`w-5 h-5 ${muted}`} />
-                        <span className={`text-[11px] tabular-nums ${dark ? "text-slate-300" : "text-slate-600"}`}>
-                          {Math.round(daily.temperature_2m_max[i + 1])}°<span className={faint}> {Math.round(daily.temperature_2m_min[i + 1])}°</span>
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </>
+          <WeatherHero
+            loc={locations[0]}
+            data={wx[locKey(locations[0])]}
+            unitF={unitF}
+            err={err}
+            dark={dark}
+            onToggleUnit={() => setUnit(unitF ? "celsius" : "fahrenheit")}
+            onEdit={() => setEditing(true)}
+          />
+          {locations.length > 1 && (
+            <div className="space-y-1.5">
+              {locations.slice(1).map((l, i) => (
+                <WeatherMini key={locKey(l)} loc={l} data={wx[locKey(l)]} dark={dark} onClick={() => makePrimary(i + 1)} />
+              ))}
+            </div>
           )}
         </>
       )}

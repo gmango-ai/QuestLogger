@@ -219,9 +219,27 @@ export async function createWhiteboard({ teamId, title, createdBy, snapshot, sco
 // layer ops on top.
 // Store a small preview thumbnail (JPEG data URL). Best-effort; gated by the
 // board's normal update RLS (owner/team/member).
-export async function saveWhiteboardThumbnail(whiteboardId, dataUrl) {
-  if (!whiteboardId || !dataUrl) return { error: null };
-  const { error } = await supabase.from("whiteboards").update({ thumbnail: dataUrl }).eq("id", whiteboardId);
+// Store the board's preview as a Storage OBJECT (not a ~120KB base64 data URL on
+// the hot `whiteboards` row). Keeping the blob out of the row is what makes the
+// snapshot PATCH cheap — the row now carries only a short URL. Uploaded to the
+// writer's own folder in the whiteboard-images bucket (covered by the existing
+// "users write own" RLS — no new policy needed). Returns the public URL.
+export async function uploadWhiteboardThumbnail(whiteboardId, blob, userId) {
+  if (!whiteboardId || !blob || !userId) return { url: null, error: { message: "missing args" } };
+  const path = `${userId}/wb-thumb-${whiteboardId}.jpg`;
+  const { error } = await supabase.storage
+    .from("whiteboard-images")
+    .upload(path, blob, { cacheControl: "300", upsert: true, contentType: "image/jpeg" });
+  if (error) return { url: null, error };
+  const { data } = supabase.storage.from("whiteboard-images").getPublicUrl(path);
+  return { url: data?.publicUrl || null, error: null };
+}
+
+// Persist the board's thumbnail reference. `value` is now a short Storage URL
+// (see uploadWhiteboardThumbnail); legacy data-URL values still render fine.
+export async function saveWhiteboardThumbnail(whiteboardId, value) {
+  if (!whiteboardId || !value) return { error: null };
+  const { error } = await supabase.from("whiteboards").update({ thumbnail: value }).eq("id", whiteboardId);
   return { error };
 }
 

@@ -66,7 +66,7 @@ export default function OfficeShell({
   const [overlayOpen, setOverlayOpen] = useState(false);
   // The widgets rail is gone — widgets now live in the app-wide slide-over
   // drawer (shared context). The in-room toggle just opens/closes it.
-  const { open: widgetsOpen, toggle: toggleWidgets } = useWidgetDrawer();
+  const { toggle: toggleWidgets } = useWidgetDrawer();
 
   // Resolve the active room from URL. We deliberately do NOT auto-
   // redirect when the URL is bare /office — that path now lands the
@@ -314,9 +314,6 @@ export default function OfficeShell({
             busy={busy}
             onJoin={() => onJoin?.(selectedRoom)}
             onStart={() => onStart?.(selectedRoom)}
-            sidebarOpen={widgetsOpen}
-            // Opens/closes the app-wide widget drawer (same everywhere now).
-            onToggleSidebar={toggleWidgets}
             onOpenRoomSwitcher={() => setOverlayOpen(true)}
             onLeaveRoom={handleLeaveRoom}
             onEditRoom={onEditRoom}

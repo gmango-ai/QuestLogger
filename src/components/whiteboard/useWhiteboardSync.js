@@ -40,6 +40,13 @@ function stripLocal(o) {
 }
 const idJson = (o) => JSON.stringify(stripLocal(o));
 
+// Single-writer election: is `meId` the lowest client-id among everyone present
+// (self + the other members)? Exactly one client is the persister at a time; a
+// lone editor (no other members) is always it. Pure + exported for testing.
+export function isPersisterId(meId, memberIds) {
+  return (memberIds || []).every((id) => meId < id);
+}
+
 export function useWhiteboardSync({ boardId, enabled, nodes, edges, setNodes, setEdges, name, onRemoteApply, onPaint, onPaintPatch }) {
   const meId = useRef("");
   if (!meId.current) {
@@ -326,5 +333,17 @@ export function useWhiteboardSync({ boardId, enabled, nodes, edges, setNodes, se
     return () => clearInterval(t);
   }, [enabled]);
 
-  return { peers, members, viewports, pushCursor, pushViewport, pushPaint, pushPaintPatch, myColor, meId: meId.current };
+  // Single-writer election: exactly ONE client persists the board to the DB (the
+  // others broadcast their edits live and rely on this one for durability), so N
+  // concurrent editors cost one write stream instead of N full-board writes — the
+  // fix for the retro brownout. The persister is the lowest client-id present,
+  // the SAME election already used to answer a joiner's sync-req above. When
+  // realtime is disabled (solo / embedded / non-synced board) `members` stays
+  // empty, so a lone editor is always the persister and saves normally.
+  const isPersister = useMemo(
+    () => isPersisterId(meId.current, members.map((m) => m.id)),
+    [members],
+  );
+
+  return { peers, members, viewports, pushCursor, pushViewport, pushPaint, pushPaintPatch, myColor, meId: meId.current, isPersister };
 }

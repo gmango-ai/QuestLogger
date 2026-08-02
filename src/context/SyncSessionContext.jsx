@@ -65,6 +65,10 @@ export function SyncSessionProvider({ session, children }) {
   // channel + heartbeat (which flaps presence for the whole room).
   const displayNameRef = useRef(settings?.name);
   displayNameRef.current = settings?.name;
+  // Current active session id, ref-mirrored so the visibility handler can
+  // re-stamp liveness without re-subscribing when the session changes.
+  const syncSessionIdRef = useRef(null);
+  syncSessionIdRef.current = syncSession?.id || null;
 
   const clearLocalSession = useCallback(() => {
     setSyncSession(null);
@@ -196,9 +200,15 @@ export function SyncSessionProvider({ session, children }) {
   // laptop, expected to be already in" case.
   useEffect(() => {
     function onVisible() {
-      if (document.visibilityState === "visible") {
-        rehydrateSyncSessionFromStorage();
-      }
+      if (document.visibilityState !== "visible") return;
+      // Re-stamp liveness BEFORE any rehydrate/reload. A backgrounded tab's
+      // heartbeat timers get throttled/paused; on foreground we must tell the
+      // server "still here" immediately, or a foregrounded-but-healthy call
+      // could be swept (its last_seen_at gone stale) in the window before the
+      // next heartbeat tick — and a swept row would then eject the whole room.
+      const id = syncSessionIdRef.current;
+      if (id) heartbeatSyncSession(id);
+      rehydrateSyncSessionFromStorage();
     }
     document.addEventListener("visibilitychange", onVisible);
     return () => document.removeEventListener("visibilitychange", onVisible);
