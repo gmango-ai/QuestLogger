@@ -62,7 +62,6 @@ export default function GuestRoomPage() {
   const [sessionRow, setSessionRow] = useState(null); // active sync_session once joined
   const [phase, setPhase] = useState("form"); // form | waiting | in | left
   const [view, setView] = useState("call"); // call | board
-  const [callNonce, setCallNonce] = useState(0); // bump to remount the call on a recoverable drop
 
   const whiteboardId = sessionRow?.whiteboard_id || null;
 
@@ -174,32 +173,40 @@ export default function GuestRoomPage() {
     if (view === "board" && !whiteboardId) setView("call");
   }, [view, whiteboardId]);
 
+  // Whether the call is currently connected (set on VideoCall's onJoined, cleared
+  // whenever we disconnect or leave). VideoCall fires onLeft on EVERY LiveKit
+  // disconnect — INCLUDING the CLIENT_INITIATED event a React unmount triggers
+  // (room.disconnect on teardown). Gating every call handler on this ref keeps a
+  // self-induced teardown (leaving, or dropping to the waiting room) from being
+  // reprocessed as a fresh drop. Mirrors PersistentVideoCall's connectedRef.
+  const connectedRef = useRef(false);
+
   const handleLeave = useCallback(async () => {
+    connectedRef.current = false;
     if (sessionRow?.id) { try { await leaveSyncSession(sessionRow.id); } catch { /* best-effort */ } }
     setPhase("left");
   }, [sessionRow?.id]);
 
-  // VideoCall fires onLeft on EVERY LiveKit disconnect, not just an intentional
-  // leave. Only a TERMINAL reason (the guest hit Leave in-call, was removed, the
-  // room closed, or they signed in elsewhere) ends the guest session. A transient
-  // network drop must NOT eject them to the "You left" screen — remount the call
-  // (bump its key) so it rejoins, mirroring the member auto-rejoin path. Their
-  // sync-session participant row is untouched, and the heartbeat tick still handles
-  // a host-restarted (rejoin by new code) or host-ended (→ waiting) session.
+  // A genuine drop while connected. Only a TERMINAL reason (in-call Leave, kick,
+  // room closed, signed in elsewhere) ends the guest session; a transient network
+  // drop sends them to the waiting room, whose 4s poll re-joins the live session
+  // automatically (self-healing) — never the terminal "You left" screen. Ignore
+  // the stale onLeft from our own unmount (connectedRef already false).
   const handleCallLeft = useCallback((reason) => {
+    if (!connectedRef.current) return;
+    connectedRef.current = false;
     if (isTerminalDisconnect(reason)) { handleLeave(); return; }
-    setCallNonce((n) => n + 1);
+    setPhase("waiting");
   }, [handleLeave]);
 
-  // VideoCall SWALLOWS a recoverable connect/token failure (it forwards it via
-  // onError and shows no card, expecting the host to re-drive). If the remount
-  // above then fails to connect — e.g. the brownout that dropped us is still on —
-  // the guest would sit on a blank "connecting" state with nothing retrying. Fall
-  // back to the waiting room, whose poll re-joins the live session automatically
-  // (self-healing, never a dead-end). A PERMANENT error (recoverable === false)
-  // is left to VideoCall's own error card + the header's Leave button.
+  // VideoCall SWALLOWS a recoverable connect/token failure (forwarded via onError,
+  // no card, host expected to re-drive). If a connect fails BEFORE we're connected
+  // it would otherwise strand the guest on a blank "connecting" state — fall back
+  // to the waiting room's self-healing poll. A recoverable error AFTER onJoined is
+  // a transient mid-call blip LiveKit recovers itself — ignore it so an active
+  // guest isn't ejected. A PERMANENT error is left to VideoCall's own card + Leave.
   const handleCallError = useCallback((_message, recoverable) => {
-    if (recoverable) setPhase("waiting");
+    if (recoverable && !connectedRef.current) setPhase("waiting");
   }, []);
 
   // ── Render: terminal / lobby states use the shared centered JoinShell ──
@@ -326,12 +333,12 @@ export default function GuestRoomPage() {
                     connected when switching views. */}
                 <div className={view === "call" ? "absolute inset-0" : "hidden"}>
                   <VideoCall
-                    key={callNonce}
                     roomId={room.room_id}
                     displayName={name}
                     publish
                     listen
                     choices={{ videoEnabled: false, audioEnabled: false }}
+                    onJoined={() => { connectedRef.current = true; }}
                     onLeft={handleCallLeft}
                     onError={handleCallError}
                   />
