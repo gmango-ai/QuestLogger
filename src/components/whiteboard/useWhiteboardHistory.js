@@ -55,14 +55,55 @@ function diffEntities(list, base) {
   return entries;
 }
 
+const isPlainObj = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+const jsonEq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+// Restore ONLY the fields this step changed (before→after) onto the CURRENT live
+// entity `cur`, taking the values from `target` (the chosen side). Recurses one
+// level into plain-object values (`data`, `style`), so a peer's concurrent edit
+// to a DIFFERENT field — or a different sub-field of `data` — of the same node
+// survives an undo/redo instead of being clobbered by a whole-entity restore.
+// (Deeper-than-one-level nesting still restores wholesale — rare on this graph.)
+export function restoreFields(cur, before, after, target) {
+  const next = { ...cur };
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  for (const k of keys) {
+    if (jsonEq(before[k], after[k])) continue; // unchanged by this step → keep cur's (a peer may own it)
+    const tv = target ? target[k] : undefined;
+    if (tv === undefined) { delete next[k]; continue; }
+    if (isPlainObj(before[k]) && isPlainObj(after[k]) && isPlainObj(next[k]) && isPlainObj(tv)) {
+      const sub = { ...next[k] };
+      const subKeys = new Set([...Object.keys(before[k]), ...Object.keys(after[k])]);
+      for (const sk of subKeys) {
+        if (jsonEq(before[k][sk], after[k][sk])) continue;
+        if (tv[sk] === undefined) delete sub[sk]; else sub[sk] = tv[sk];
+      }
+      next[k] = sub;
+    } else {
+      next[k] = tv;
+    }
+  }
+  next.selected = true;
+  return next;
+}
+
 // Apply a transaction's reverts to a live entity list, restoring the chosen
-// side (null = remove). Restored entities are selected so the change is visible.
-function applyReverts(list, entries, side, sortParents) {
+// side. Restored entities are selected so the change is visible.
+//   • MODIFIED (before & after both present) → field-level merge onto the live
+//     entity (preserves concurrent peer edits to other fields).
+//   • ADD/REMOVE (before or after null) → whole-entity set/delete, as before.
+export function applyReverts(list, entries, side, sortParents) {
   const map = new Map(list.map((x) => [x.id, x]));
   for (const e of entries) {
     const target = e[side];
-    if (target == null) map.delete(e.id);
-    else map.set(e.id, { ...target, selected: true });
+    if (e.before != null && e.after != null) {
+      const cur = map.get(e.id);
+      map.set(e.id, cur ? restoreFields(cur, e.before, e.after, target) : { ...target, selected: true });
+    } else if (target == null) {
+      map.delete(e.id);
+    } else {
+      map.set(e.id, { ...target, selected: true });
+    }
   }
   const out = [...map.values()];
   return sortParents ? sortParentsFirst(out) : out;
