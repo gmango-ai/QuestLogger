@@ -1,4 +1,5 @@
 import { supabase } from "../supabase";
+import { getShareableBaseUrl } from "./platform";
 
 export async function listRooms(teamId) {
   if (!teamId) return { data: [], error: null };
@@ -245,4 +246,91 @@ export async function fetchRoomActiveSession(roomId) {
     .eq("status", "active")
     .maybeSingle();
   return { data, error };
+}
+
+// ── External guest links ───────────────────────────────────────────
+// A tokenized share link that lets an outside person (not a team member) join
+// a room's call + attached whiteboard as an anonymous guest. Creating a link
+// implicitly enables guests for the room; links are reusable, expiring, and
+// revocable. Manager-only (owner / admin / gating-team lead) — enforced server
+// side. See migrations 20260809200000_room_guests_core / _room_guest_rpcs.
+
+// Absolute, shareable URL for a guest token (handles native → production origin).
+export function guestLinkUrl(token) {
+  return `${getShareableBaseUrl()}/office/guest/${token}`;
+}
+
+// Mint a link. `expiresAt` is an ISO string / Date (default 7 days server-side);
+// `label` is an optional human note ("Acme kickoff"). Returns { id, token,
+// expires_at } plus a ready-to-share `url`.
+export async function createGuestLink(roomId, { expiresAt = null, label = null } = {}) {
+  const { data, error } = await supabase.rpc("create_guest_link", {
+    p_room_id: roomId,
+    p_expires_at: expiresAt ? new Date(expiresAt).toISOString() : null,
+    p_label: label,
+  });
+  if (error) return { error };
+  return { data: { ...data, url: guestLinkUrl(data.token) } };
+}
+
+export async function revokeGuestLink(linkId) {
+  const { error } = await supabase.rpc("revoke_guest_link", { p_link_id: linkId });
+  return { error };
+}
+
+// List a room's active (non-revoked) guest links. RLS returns rows only to the
+// room's managers, so a non-manager silently gets an empty list.
+export async function listGuestLinks(roomId) {
+  if (!roomId) return { data: [], error: null };
+  const { data, error } = await supabase
+    .from("room_guest_links")
+    .select("id, token, label, expires_at, revoked_at, created_at")
+    .eq("room_id", roomId)
+    .is("revoked_at", null)
+    .order("created_at", { ascending: false });
+  return {
+    data: (data || []).map((r) => ({ ...r, url: guestLinkUrl(r.token) })),
+    error,
+  };
+}
+
+// Ensure a room has a guest join link for a meeting: reuse an existing one if
+// given, else mint a fresh one. Fails SOFT — returns nulls when the scheduler
+// isn't a room manager (create_guest_link raises) so scheduling never breaks
+// over a missing invite link; the meeting just syncs without an auto-join URL.
+export async function ensureGuestJoinLink(roomId, { existingId = null, existingUrl = null, label = null } = {}) {
+  if (existingUrl) return { id: existingId, url: existingUrl };
+  if (!roomId) return { id: null, url: null };
+  const { data, error } = await createGuestLink(roomId, { label });
+  if (error || !data) return { id: null, url: null };
+  return { id: data.id, url: data.url };
+}
+
+// Build a calendar event's { description, location } so external attendees get a
+// one-click join link. With a join URL: location = the URL (Google renders it as
+// a clickable join link, and the app's joinUrlOf treats an https location as a
+// join button), and the room name + link are appended to the description.
+export function buildMeetingCalendarFields({ description = "", roomName = "", joinUrl = null } = {}) {
+  const base = (description || "").trim();
+  if (!joinUrl) {
+    return { description: base || undefined, location: roomName || undefined };
+  }
+  const desc = [base, roomName ? `Room: ${roomName}` : null, `Join the room: ${joinUrl}`]
+    .filter(Boolean)
+    .join("\n\n");
+  return { description: desc, location: joinUrl };
+}
+
+// Redeem a guest token (the caller must already have an anonymous session).
+// Mints a room_guests grant and returns { room_id, room_name, team_id }.
+// Surfaces server-side rejections (invalid / expired / revoked / guests_disabled)
+// as an { error } with a `code` for the landing page to branch on.
+export async function resolveRoomByGuestToken(token, displayName = "") {
+  const { data, error } = await supabase.rpc("resolve_room_by_guest_token", {
+    p_token: token,
+    p_display_name: displayName,
+  });
+  if (error) return { error };
+  if (data?.error) return { error: { code: data.error, message: data.error } };
+  return { data };
 }

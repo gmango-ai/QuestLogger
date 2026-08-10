@@ -9,6 +9,7 @@ import {
   setRoomPinPolicy, setRoomKnockEnabled, setRoomWhiteboardLock, setRoomKind,
 } from "../lib/rooms";
 import { clearRoomChat } from "../lib/chatMessages";
+import RoomGuestInvite from "./office/RoomGuestInvite";
 
 const DURATION_PRESETS = [
   { value: 15, label: "15m" },
@@ -523,6 +524,10 @@ export default function RoomSettingsModal({
             </label>
           )}
         </div>
+
+        {/* External guests — tokenized share links that let outsiders join this
+            room's call + whiteboard (self-contained; saves immediately). */}
+        <RoomGuestInvite room={room} dark={dark} onError={onError} />
 
         {/* Pin control — who can pin a participant into everyone's view during a
             call (sets the shared focus all clients follow). */}

@@ -1851,7 +1851,7 @@ export function AppProvider({ session, children }) {
   }
 
   // Patch a Google event we created (write-back on reschedule/edit).
-  async function updateCalendarEvent(eventId, { start, end, summary, description } = {}) {
+  async function updateCalendarEvent(eventId, { start, end, summary, description, location } = {}) {
     if (!eventId || !(await ensureGoogleToken())) return { error: { message: "not connected" } };
     const toISO = (d) => (d instanceof Date ? d.toISOString() : new Date(d).toISOString());
     const body = {};
@@ -1859,6 +1859,7 @@ export function AppProvider({ session, children }) {
     if (end) body.end = { dateTime: toISO(end) };
     if (summary !== undefined) body.summary = summary;
     if (description !== undefined) body.description = description || "";
+    if (location !== undefined) body.location = location || "";
     let res;
     try {
       res = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(eventId)}`, {
