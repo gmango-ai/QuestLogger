@@ -28,7 +28,7 @@ const LK_TERMINAL_DISCONNECTS = new Set([
 // distinct tag (≠ "livekit-disconnected") so endCall clears the rejoin marker;
 // everything else stays "livekit-disconnected" (recoverable → eligible to
 // auto-rejoin, and the string that also fires on a logout unmount).
-function endReasonForDisconnect(reason) {
+export function endReasonForDisconnect(reason) {
   return LK_TERMINAL_DISCONNECTS.has(reason) ? `livekit-${reason}` : "livekit-disconnected";
 }
 

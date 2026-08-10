@@ -33,8 +33,11 @@ function colorFor(id) {
 }
 
 // Per-user UI state that must never sync between peers (my selection /
-// drag must not yank yours). Everything else describes the shared graph.
-function stripLocal(o) {
+// drag must not yank yours). Everything else describes the shared graph —
+// crucially INCLUDING `draggable` and `data.locked`, the matched pair that
+// carries a node's lock, so a lock survives the broadcast (see the frame-lock
+// fix). Exported for regression testing of exactly that.
+export function stripLocal(o) {
   const { selected, dragging, resizing, ...rest } = o;
   return rest;
 }
