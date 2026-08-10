@@ -4,6 +4,34 @@ Notable changes to Mangodoro. Pre-1.0, so grouped by date/area rather than
 semantic versions. Newest first. Each release lists **New & improved** (features
 and changes to features) and **Fixes**.
 
+## 2026-08-10
+
+### New & improved
+
+- perf(whiteboard,calls): evict cleared paint tiles; kiosk holds roles on reconnect
+- chore(auth): enable anonymous sign-ins (required for room guests)
+- refactor(rooms): tab the Room settings modal to declutter the layout
+- perf(whiteboard,calls): reap paint strokes, memoize overlays + call tiles
+- feat(rooms): external guest invites (share link + email) + Google Calendar join links
+
+### Fixes
+
+- (calls): close guest Leave↔Rejoin race (sync guard + await before reveal)
+- (calls): guest leave transitions phase synchronously (close leave race)
+- (calls): discriminate guest drop by phase, recover pre-connect join_failure
+- (calls): guest reconnect via connectedRef gate, drop key-remount
+- (calls): guest reconnect can't dead-end on a failed remount
+- (review): address 4 Bugbot findings on release PR #146
+- (rooms): address Cursor Bugbot review findings
+- (review): address 3 Bugbot findings on PR #145
+- (security): revoke anon/PUBLIC EXECUTE on notification-emit internals + sweeps
+- (security): make message-attachments bucket private + signed URLs
+- (security): harden RLS for anonymous users (anon sign-ins enabled)
+- (calls): kiosk DevicePortalCall recovers from brownouts + drops
+- (whiteboard): field-level undo so a peer's concurrent edit survives
+- (calls): fix companion mic mute + echo; add audio regression net
+- (whiteboard,calls): harden collab sync, persistence, and call rejoin
+
 ## 2026-08-02
 
 ### New & improved
