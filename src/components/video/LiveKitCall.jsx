@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
   LiveKitRoom,
   RoomAudioRenderer,
@@ -30,7 +30,7 @@ import { useMeetingRecording } from "../../hooks/useMeetingRecording";
 import EmoteBar from "../emotes/EmoteBar";
 import { LIVEKIT_URL, fetchLiveKitToken, liveKitRoomName } from "../../lib/livekit";
 import { kickFromCall, muteParticipantTrack, setRoomPin, clearRoomPin } from "../../lib/livekitModerate";
-import { useRoomCluster, useClusterRoles, ATTR_ROOM_DEVICE } from "./useRoomCluster";
+import { useRoomCluster, ATTR_ROOM_DEVICE } from "./useRoomCluster";
 import { PREF, loadPref, savePref } from "./callPrefs";
 import { getLkRoomOptions, LK_CONNECT_OPTIONS, connectDelayFor, markConnectAttempt, connectCooldownMs, noteConnectFailure } from "./livekitConnect";
 import { diagReset, diagRecord, diagReport, diagEnv, logAudioEvent } from "./livekitDiagnostics";
@@ -988,11 +988,10 @@ function DeviceSettingsMenu({ kind, label, children }) {
 // popover shows who's together and a Leave action.
 function RoomClusterButton({ autoMic, onToggleAutoMic }) {
   const {
-    cluster, members, isMicSource, isAudioSink, existingCluster,
+    cluster, members, isMicSource, isAudioSink, existingCluster, roles,
     startRoom, joinRoom, takeSpeaker, stepDown, takeSink, releaseSink, leaveRoom,
   } = useCluster();
   const { beginEntryHold } = useRoomEntryHold();
-  const roles = useClusterRoles();
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
   useEffect(() => {
@@ -1803,13 +1802,13 @@ function CallAvatar({ name, src, id, size = 34, speaking = false, dimmed = false
 // in the shared cluster-roles map (so it reflects the EFFECTIVE leader, e.g.
 // after a take-over). Wraps the default tile in a flex box and lets it fill, so
 // the grid layout is unaffected.
-function ClusterParticipantTile({ trackRef: trackRefProp }) {
+const ClusterParticipantTile = memo(function ClusterParticipantTile({ trackRef: trackRefProp }) {
   // Our layout engine passes the track ref explicitly; inside a LiveKit layout
   // it comes from context. Either way ParticipantTile gets it as a prop.
   const ctxTrackRef = useMaybeTrackRefContext();
   const trackRef = trackRefProp || ctxTrackRef;
   const participant = trackRef?.participant;
-  const roles = useClusterRoles();
+  const { roles } = useCluster();
   const globalPinId = useGlobalPin();
   const { canPin, pin, unpin, busyId } = useContext(PinControlContext);
   const { raisedIds, order: handOrder } = useContext(HandRaiseContext);
@@ -2078,7 +2077,12 @@ function ClusterParticipantTile({ trackRef: trackRefProp }) {
       )}
     </div>
   );
-}
+}, (a, b) => refKey(a.trackRef) === refKey(b.trackRef));
+// memo(refKey): the Stage re-renders on every active-speaker transition (several
+// times/sec in conversation) and rebuilds the tiles array with fresh elements.
+// Active-speaker changes do NOT touch the cluster context, so tiles whose track
+// identity is unchanged now skip that parent-driven re-render — their own
+// useIsSpeaking/quality subscriptions still update the ring and dot.
 
 function useSize(ref) {
   const [size, setSize] = useState({ w: 0, h: 0 });

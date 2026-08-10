@@ -23,6 +23,35 @@ export function createPaintStore(onCreate) {
   return { tiles: new Map(), strokes: new Map(), onCreate };
 }
 
+// Drop a stroke session's per-tile scratch (two TILE_PX² canvases each) + sprite,
+// zeroing the canvases so their backing store is released promptly rather than
+// waiting for GC. The baked pixels already live on the real tile, so this is safe.
+function releaseStrokeSession(session) {
+  if (!session) return;
+  for (const st of session.tiles.values()) {
+    st.wctx = null;
+    if (st.dry) { st.dry.width = 0; st.dry.height = 0; }
+    if (st.wet) { st.wet.width = 0; st.wet.height = 0; }
+  }
+  session.tiles.clear();
+  session.sprite = null;
+}
+
+// Reap stroke sessions whose `end` chunk never arrived — a dropped broadcast or a
+// peer who left mid-stroke would otherwise leak its scratch canvases for the whole
+// session. Idle-timed (well past the ~70ms flush cadence): a late continuation of
+// an already-reaped stroke just starts a fresh session (a harmless tiny seam).
+export function reapStaleStrokes(store, maxIdleMs = 8000) {
+  if (!store || !store.strokes || !store.strokes.size) return;
+  const now = performance.now();
+  for (const [id, session] of store.strokes) {
+    if (now - (session.lastTouched || 0) > maxIdleMs) {
+      releaseStrokeSession(session);
+      store.strokes.delete(id);
+    }
+  }
+}
+
 // Materialise a tile without drawing (used when loading a persisted PNG in).
 export function ensureTile(store, tx, ty) {
   return getOrCreateTile(store, tx, ty);
@@ -325,6 +354,7 @@ export function applyPaintChunk(store, chunk) {
   const opacity = brush.opacity ?? 1;
   let session = store.strokes.get(chunk.id);
   if (!session) { session = { prev: null, i: 0, tiles: new Map() }; store.strokes.set(chunk.id, session); }
+  session.lastTouched = performance.now(); // for reapStaleStrokes (dropped-end leak)
   let prev = session.prev;
   let i = session.i;
   const touched = new Set();
@@ -360,6 +390,6 @@ export function applyPaintChunk(store, chunk) {
     const rb = Math.min(TILE_PX, Math.ceil((Math.min(by1 + pad, oy + TILE_UNITS) - oy) * PX_PER_UNIT));
     recompose(st, opacity, brush.mode, rx, ry, rr - rx, rb - ry);
   }
-  if (chunk.end) store.strokes.delete(chunk.id);
+  if (chunk.end) { releaseStrokeSession(session); store.strokes.delete(chunk.id); }
   else { session.prev = prev; session.i = i; }
 }

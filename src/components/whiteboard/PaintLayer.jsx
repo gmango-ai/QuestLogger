@@ -1,6 +1,6 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { ViewportPortal } from "@xyflow/react";
-import { createPaintStore, applyPaintChunk, ensureTile, TILE_UNITS, TILE_PX, PX_PER_UNIT } from "./paintTiles";
+import { createPaintStore, applyPaintChunk, ensureTile, reapStaleStrokes, TILE_UNITS, TILE_PX, PX_PER_UNIT } from "./paintTiles";
 import { listPaintTiles, uploadPaintTile } from "../../lib/whiteboardPaint";
 
 const FLUSH_DELAY_MS = 2000; // idle time before dirty tiles are saved to Storage
@@ -222,6 +222,14 @@ const PaintLayer = forwardRef(function PaintLayer({ boardId, enabled, zIndex = 5
 
   // Flush any pending save on unmount.
   useEffect(() => () => { if (flushTimer.current) { clearTimeout(flushTimer.current); doFlush(); } }, [doFlush]);
+
+  // Reap stroke sessions whose `end` never arrived (a dropped broadcast / a peer
+  // who left mid-stroke) so their per-tile scratch canvases can't leak for the
+  // whole board session. Cheap idle sweep; the baked pixels are already on-tile.
+  useEffect(() => {
+    const t = setInterval(() => reapStaleStrokes(storeRef.current), 5000);
+    return () => clearInterval(t);
+  }, []);
 
   // Load persisted tiles for this board on open. Skip a tile that's been
   // painted locally since (don't clobber fresh edits). crossOrigin keeps the

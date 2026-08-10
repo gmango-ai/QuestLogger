@@ -328,6 +328,12 @@ export function useRoomCluster({ manage = false } = {}) {
 
   return {
     cluster,
+    // Per-identity cluster roles computed ONCE here (this hook already owns the
+    // single ParticipantAttributesChanged subscription + the participants array).
+    // Consumers read useCluster().roles instead of each calling useClusterRoles(),
+    // which used to install N duplicate listeners and recompute clusterRolesOf
+    // (O(participants)) per tile per attribute change — an O(N^2) fan-out.
+    roles: clusterRolesOf(participants),
     micSourceId,
     audioSinkId,
     isMicSource,
