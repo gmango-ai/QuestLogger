@@ -182,10 +182,15 @@ export default function GuestRoomPage() {
     if (view === "board" && !whiteboardId) setView("call");
   }, [view, whiteboardId]);
 
-  const handleLeave = useCallback(async () => {
+  const handleLeave = useCallback(() => {
+    // Transition SYNCHRONOUSLY (phaseRef → "left") before the leave RPC — never
+    // awaiting it first. Otherwise phaseRef would linger on "in" across the await
+    // and a concurrent onLeft could arm the waiting poll and re-join a guest who
+    // chose to leave (a slow leave RPC during a brownout makes this window wide).
+    // leaveSyncSession is best-effort, so fire-and-forget.
     connectedRef.current = false;
-    if (sessionRow?.id) { try { await leaveSyncSession(sessionRow.id); } catch { /* best-effort */ } }
     goPhase("left");
+    if (sessionRow?.id) leaveSyncSession(sessionRow.id).catch(() => { /* best-effort */ });
   }, [sessionRow?.id, goPhase]);
 
   // VideoCall fires onLeft on EVERY LiveKit disconnect — INCLUDING the
