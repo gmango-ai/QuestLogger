@@ -191,6 +191,17 @@ export default function GuestRoomPage() {
     setCallNonce((n) => n + 1);
   }, [handleLeave]);
 
+  // VideoCall SWALLOWS a recoverable connect/token failure (it forwards it via
+  // onError and shows no card, expecting the host to re-drive). If the remount
+  // above then fails to connect — e.g. the brownout that dropped us is still on —
+  // the guest would sit on a blank "connecting" state with nothing retrying. Fall
+  // back to the waiting room, whose poll re-joins the live session automatically
+  // (self-healing, never a dead-end). A PERMANENT error (recoverable === false)
+  // is left to VideoCall's own error card + the header's Leave button.
+  const handleCallError = useCallback((_message, recoverable) => {
+    if (recoverable) setPhase("waiting");
+  }, []);
+
   // ── Render: terminal / lobby states use the shared centered JoinShell ──
   if (session === undefined) return <JoinShell loading />;
 
@@ -322,6 +333,7 @@ export default function GuestRoomPage() {
                     listen
                     choices={{ videoEnabled: false, audioEnabled: false }}
                     onLeft={handleCallLeft}
+                    onError={handleCallError}
                   />
                 </div>
                 {whiteboardId && (
