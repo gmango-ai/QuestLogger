@@ -151,15 +151,26 @@ export default function GuestRoomPage() {
       const { data: active } = await fetchRoomActiveSession(room.room_id);
       if (cancelled) return;
       if (!active) { setPhase("waiting"); return; }
-      // If the host restarted (new session id), re-join it.
+      // If the host restarted (new session id), re-join it. If the rejoin FAILS
+      // (revoked grant, full room, transient error), drop back to the waiting
+      // room instead of pointing the shell at a session we're not a participant
+      // of (which would break whiteboard RLS + heartbeats while looking connected).
       if (active.id !== sessionRow.id && active.join_code) {
-        await joinSyncSession(active.join_code, name.trim());
+        const { error: rejoinErr } = await joinSyncSession(active.join_code, name.trim());
+        if (cancelled) return;
+        if (rejoinErr) { setPhase("waiting"); return; }
       }
       setSessionRow((prev) => (prev && prev.whiteboard_id === active.whiteboard_id && prev.id === active.id ? prev : active));
     };
     const id = setInterval(tick, HEARTBEAT_MS);
     return () => { cancelled = true; clearInterval(id); };
   }, [phase, sessionRow?.id, room, name]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // If the linked board is removed (host unlinks it) while the guest is on the
+  // Whiteboard tab, fall back to the call so the shell never shows a blank pane.
+  useEffect(() => {
+    if (view === "board" && !whiteboardId) setView("call");
+  }, [view, whiteboardId]);
 
   const handleLeave = useCallback(async () => {
     if (sessionRow?.id) { try { await leaveSyncSession(sessionRow.id); } catch { /* best-effort */ } }

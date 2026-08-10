@@ -115,9 +115,12 @@ export default function ScheduleMeetingModal({ room, rooms, teamId, dark, initia
 
     // External-guest join link: when the meeting has outside attendees, mint (or
     // reuse) a room guest link so those emails get a one-click way in. Fails soft
-    // if the scheduler isn't a room manager — the meeting still saves.
-    let guestLinkId = meeting?.guest_link_id || null;
-    let guestJoinUrl = meeting?.guest_join_url || null;
+    // if the scheduler isn't a room manager — the meeting still saves. If the room
+    // CHANGED on edit, drop the old link so we mint one for the new room (else the
+    // calendar/attendees would point at the previous room).
+    const roomChanged = editing && meeting?.room_id && effRoom?.id && meeting.room_id !== effRoom.id;
+    let guestLinkId = roomChanged ? null : (meeting?.guest_link_id || null);
+    let guestJoinUrl = roomChanged ? null : (meeting?.guest_join_url || null);
     if (emails.length > 0 && effRoom?.id && !guestJoinUrl) {
       const link = await ensureGuestJoinLink(effRoom.id, { label: title.trim() });
       guestLinkId = link.id;
