@@ -68,7 +68,25 @@ export function useWhiteboardSync({ boardId, enabled, nodes, edges, setNodes, se
   const primed = useRef(false);
   const presence = useRef(new Set([meId.current]));
 
-  const [peers, setPeers] = useState({});     // id → { x, y, name, color, ts }
+  // Remote cursors update at pointer-move frequency. Keeping them in React state
+  // re-rendered the entire WhiteboardEditor on every peer's every move — the
+  // meeting lag. Instead hold them in a ref-backed store with imperative
+  // subscribers: CollabCursors folds each snapshot into its own rAF loop and
+  // only React-renders when the SET of peers changes, so idle cursor motion
+  // costs zero editor renders. setPeers keeps its functional-updater contract.
+  const peersRef = useRef({});               // id → { x, y, name, color, ts }
+  const cursorListeners = useRef(new Set());
+  const setPeers = useCallback((updater) => {
+    const next = typeof updater === "function" ? updater(peersRef.current) : updater;
+    if (next === peersRef.current) return;   // updater signalled "no change"
+    peersRef.current = next;
+    for (const cb of cursorListeners.current) { try { cb(next); } catch { /* */ } }
+  }, []);
+  const subscribeCursors = useCallback((cb) => {
+    cursorListeners.current.add(cb);
+    cb(peersRef.current);                     // prime with current state
+    return () => { cursorListeners.current.delete(cb); };
+  }, []);
   const [members, setMembers] = useState([]);  // [{ id, name, color }] (others)
   const [viewports, setViewports] = useState({}); // id → { x, y, zoom, ts } (for follow)
 
@@ -122,6 +140,10 @@ export function useWhiteboardSync({ boardId, enabled, nodes, edges, setNodes, se
   // ── incoming: merge remote ops by id (preserving my local UI state) ──
   const applyOps = useCallback((p) => {
     if (!p || p.from === meId.current) return;
+    // A resync answer carries `to` (the joiner). Broadcast reaches every peer,
+    // so ignore a full-board dump addressed to someone else — otherwise it
+    // clobbers established peers' concurrent edits + locks (frame-lock loss).
+    if (p.to && p.to !== meId.current) return;
     // Let undo/redo history absorb peer changes into its baseline so they
     // never become one of MY undo steps (see useWhiteboardHistory).
     onRemoteApply?.(p);
@@ -213,8 +235,16 @@ export function useWhiteboardSync({ boardId, enabled, nodes, edges, setNodes, se
       const minId = others.length ? others.reduce((a, b) => (a < b ? a : b)) : meId.current;
       if (minId !== meId.current) return;
       try {
+        // Address the full-board dump to the JOINER only (`to`). Broadcast can't
+        // target a single peer, so every established peer also receives this —
+        // but applyOps drops any op addressed to someone else. Without this, a
+        // stale responder's whole-board copy overwrites everyone's live state
+        // (last-writer-wins), silently reverting concurrent edits and locks
+        // (draggable:false + data.locked flip back together) → the frame-lock
+        // loss. A join/reconnect fires sync-req often in this brownout-prone app.
         ch.send({ type: "broadcast", event: "ops", payload: {
           from: meId.current,
+          to: from,
           nodeOps: nodesRef.current.map(stripLocal),
           edgeOps: edgesRef.current.map(stripLocal),
           removedNodes: [], removedEdges: [],
@@ -345,5 +375,5 @@ export function useWhiteboardSync({ boardId, enabled, nodes, edges, setNodes, se
     [members],
   );
 
-  return { peers, members, viewports, pushCursor, pushViewport, pushPaint, pushPaintPatch, myColor, meId: meId.current, isPersister };
+  return { subscribeCursors, members, viewports, pushCursor, pushViewport, pushPaint, pushPaintPatch, myColor, meId: meId.current, isPersister };
 }

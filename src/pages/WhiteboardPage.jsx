@@ -82,6 +82,7 @@ import {
   preferredShape,
   setPreferredShape,
   QuickConnectContext,
+  BoardIdContext,
   ShapeSvg,
   preferredStickyColor,
   setPreferredStickyColor,
@@ -661,7 +662,7 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
   const applyPaintOpsRef = useRef(null);
   const onPaintPatch = useCallback((ops) => applyPaintOpsRef.current?.(ops, false), []);
 
-  const { peers, members, viewports, pushCursor, pushViewport, pushPaint, pushPaintPatch, myColor, isPersister } = useWhiteboardSync({
+  const { subscribeCursors, members, viewports, pushCursor, pushViewport, pushPaint, pushPaintPatch, myColor, isPersister } = useWhiteboardSync({
     boardId: board?.id,
     enabled: collabEnabled,
     nodes,
@@ -2755,6 +2756,7 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
       {/* The embedded (room) board now shows the full title-bar toolbar
           (export / capture / save-template / reactions), at parity with the
           full page — so the old standalone top-right PNG button is gone. */}
+      <BoardIdContext.Provider value={board?.id || boardId}>
       <QuickConnectContext.Provider value={quickConnectApi}>
       <ConnectShapeContext.Provider value={pickedShape}>
       <AreaSelectedEdgesContext.Provider value={areaSelEdgeIds}>
@@ -2838,7 +2840,12 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
         />
         {/* Tiled raster paint layer (collaborative; strokes sync as vectors,
             tiles persist to Storage). High z so paint sits over nodes/images. */}
-        <PaintLayer ref={paintRef} boardId={board?.id} enabled={collabEnabled} zIndex={900} />
+        {/* key by board id: remount per board so the raster tile store is
+            discarded on A→B navigation. The old instance's unmount-flush still
+            writes its dirty tiles to the OLD board (boardRef is still A), then a
+            fresh, empty store loads only B's tiles — preventing A's ink from
+            rendering on and being uploaded over board B. */}
+        <PaintLayer key={board?.id || "no-board"} ref={paintRef} boardId={board?.id} enabled={collabEnabled} zIndex={900} />
         {/* Floating region selection (raster + picked pen strokes) + controls. */}
         {areaSel && (
           <>
@@ -2886,7 +2893,7 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
             on mobile and duplicates the top bar's fit-view. Embedded room
             tiles keep it (staging enables it there). */}
         {(!compact || embedded) && showMinimap && <MiniMap pannable zoomable position="bottom-right" className="hidden sm:block" />}
-        <CollabCursors peers={peers} />
+        <CollabCursors subscribe={subscribeCursors} />
         <PresenceStack members={members} viewports={viewports} followingId={followingId} onFollow={followMember} dark={dark} />
         {collabEnabled && <ViewportBroadcaster push={pushViewport} paused={!!followingId} />}
 
@@ -3225,6 +3232,7 @@ function WhiteboardEditor({ boardId, embedded = false, readOnly = false }) {
       </AreaSelectedEdgesContext.Provider>
       </ConnectShapeContext.Provider>
       </QuickConnectContext.Provider>
+      </BoardIdContext.Provider>
 
       {/* "?" keyboard-shortcuts cheatsheet (top-level overlay). */}
       <WhiteboardShortcuts open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} dark={dark} />

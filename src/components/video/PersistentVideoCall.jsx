@@ -94,7 +94,7 @@ const MAX_CSS =
   "padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);";
 
 export default function PersistentVideoCall() {
-  const { call, startCall, endCall, updateCall, stageEl, poppedOut, setPoppedOut, setCanPopOut, registerPopout, maximized, hideChrome } = useVideoCall();
+  const { call, startCall, endCall, updateCall, markConnected, stageEl, poppedOut, setPoppedOut, setCanPopOut, registerPopout, maximized, hideChrome } = useVideoCall();
   const { syncSession, joinSession } = useSyncSession();
   const { session } = useApp();
   const { theme } = useTheme();
@@ -353,12 +353,21 @@ export default function PersistentVideoCall() {
         // Join / Watch / settings. Avoids two stacked bottom bars.
         chromeless={call.mode === "spectate"}
         onJoinIn={() => updateCall({ mode: "join" })}
-        onJoined={() => { connectedRef.current = true; }}
+        // A real media connection stuck → reset the auto-rejoin backoff budget.
+        onJoined={() => { connectedRef.current = true; markConnected(); }}
         // A genuine LiveKit disconnect (or explicit Leave) is the ONLY media-side
         // teardown. Forward the reason so a terminal drop (kick / duplicate /
         // room gone) clears the rejoin marker while a plain network drop keeps it
         // (→ VideoCallContext's watcher reconnects).
         onLeft={(reason) => { connectedRef.current = false; endCall(endReasonForDisconnect(reason)); }}
+        // A RECOVERABLE connect-time failure (token mint / room error during a
+        // brownout) before we ever connected: route it through the recoverable
+        // teardown so the rejoin ladder retries with backoff instead of dead-
+        // ending on VideoCall's terminal "Couldn't load the call" card. Only when
+        // media never connected — a post-connect error is handled by onLeft.
+        onError={(_msg, recoverable) => {
+          if (recoverable && !connectedRef.current) endCall("livekit-disconnected");
+        }}
       />
 
       {/* In-app PiP chrome: a thin header with back-to-room + leave. (Pop-out

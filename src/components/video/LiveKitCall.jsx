@@ -430,10 +430,13 @@ function PublishController({ publish, choices, micMuted }) {
     return () => { room.off(RoomEvent.Connected, applyRole); room.off(RoomEvent.Reconnected, applyRole); };
   }, [localParticipant, room, publish]);
 
-  // Camera — join choices + connect/reconnect only. In-call camera toggles
-  // (TrackToggle) are NOT reset when micMuted or cluster state changes.
-  // Re-running setCameraEnabled off stale join-time `choices.videoEnabled`
-  // was force-killing a camera turned on mid-call.
+  // Camera — apply join choices at CONNECT only, never on reconnect. In-call
+  // camera toggles (TrackToggle) never update the app's `choices`, so re-applying
+  // the stale join-time `choices.videoEnabled` on RoomEvent.Reconnected silently
+  // clobbered a mid-call toggle — turning a privacy-off camera back ON (or
+  // dropping a deliberately-enabled one) on every transient network blip. LiveKit
+  // already preserves live local tracks on a resume and republishes the currently
+  // -live tracks on a full reconnect, so re-applying is both unnecessary and wrong.
   useEffect(() => {
     if (!localParticipant || !room) return undefined;
     const applyCamera = () => {
@@ -443,9 +446,8 @@ function PublishController({ publish, choices, micMuted }) {
         .catch(() => { /* device denied/unavailable — stay subscribe-only */ });
     };
     room.on(RoomEvent.Connected, applyCamera);
-    room.on(RoomEvent.Reconnected, applyCamera);
     if (room.state === "connected") applyCamera();
-    return () => { room.off(RoomEvent.Connected, applyCamera); room.off(RoomEvent.Reconnected, applyCamera); };
+    return () => { room.off(RoomEvent.Connected, applyCamera); };
   }, [localParticipant, room, publish, choices?.videoEnabled, choices?.videoDeviceId]);
 
   // Mic gating — re-applied on connect AND whenever the room-audio cluster state
@@ -2858,6 +2860,18 @@ export default function LiveKitCall({ roomId, displayName, compact, publish = tr
     if (next) setMicMuted(true); // deafening also mutes your mic
   };
 
+  // Spectate→Join re-seed. In the watch→join flow this component stays mounted
+  // (publish flips false→true, choices updates in the same render) so micMuted's
+  // one-time useState seed keeps its stale spectate value — a "Join muted" choice
+  // was ignored and the user joined with a HOT mic. Re-seed from the new choices
+  // on the publish false→true edge ONLY, so fresh green-room joins (correct at
+  // mount) and in-call user mute toggles (publish already true) are untouched.
+  const prevPublishRef = useRef(publish);
+  useEffect(() => {
+    if (publish && !prevPublishRef.current) setMicMuted(choices?.audioEnabled === false);
+    prevPublishRef.current = publish;
+  }, [publish, choices?.audioEnabled]);
+
   useEffect(() => {
     let cancelled = false;
     setToken(null);
@@ -2880,7 +2894,7 @@ export default function LiveKitCall({ roomId, displayName, compact, publish = tr
             console.warn(`[livekit] token mint failed (room ${roomId}): ${msg}`);
             diagRecord(room, "token_error", { message: msg });
             noteConnectFailure();
-            onError?.(msg);
+            onError?.(msg, true); // recoverable → host routes through the rejoin ladder
           }
         }
       })();
@@ -2891,7 +2905,7 @@ export default function LiveKitCall({ roomId, displayName, compact, publish = tr
   }, [roomId]);
 
   if (!LIVEKIT_URL) {
-    onError?.("LiveKit is not configured (missing VITE_LIVE_KIT_URL)");
+    onError?.("LiveKit is not configured (missing VITE_LIVE_KIT_URL)", false); // permanent config error → terminal card
     return null;
   }
 
@@ -2962,7 +2976,7 @@ export default function LiveKitCall({ roomId, displayName, compact, publish = tr
           diagRecord(liveKitRoomName(roomId), "error", { message: msg });
           console.warn(`[livekit] room error (room ${roomId}): ${msg}`);
           noteConnectFailure();
-          onError?.(msg);
+          onError?.(msg, true); // recoverable → rejoin ladder (host only acts if not yet connected)
         }}
       >
         <RoomClusterProvider>
