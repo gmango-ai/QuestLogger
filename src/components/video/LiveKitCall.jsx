@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
   LiveKitRoom,
   RoomAudioRenderer,
@@ -30,7 +30,8 @@ import { useMeetingRecording } from "../../hooks/useMeetingRecording";
 import EmoteBar from "../emotes/EmoteBar";
 import { LIVEKIT_URL, fetchLiveKitToken, liveKitRoomName } from "../../lib/livekit";
 import { kickFromCall, muteParticipantTrack, setRoomPin, clearRoomPin } from "../../lib/livekitModerate";
-import { useRoomCluster, useClusterRoles, ATTR_ROOM_DEVICE } from "./useRoomCluster";
+import { useRoomCluster, ATTR_ROOM_DEVICE } from "./useRoomCluster";
+import { shouldHearRoomAudio, computeMicLive, ENTRY_FAILOPEN_MS, FOUNDER_SETTLE_MS } from "./audioGate";
 import { PREF, loadPref, savePref } from "./callPrefs";
 import { getLkRoomOptions, LK_CONNECT_OPTIONS, connectDelayFor, markConnectAttempt, connectCooldownMs, noteConnectFailure } from "./livekitConnect";
 import { diagReset, diagRecord, diagReport, diagEnv, logAudioEvent } from "./livekitDiagnostics";
@@ -369,12 +370,16 @@ function useHandRaiseValue() {
 function PublishController({ publish, choices, micMuted }) {
   const { localParticipant } = useLocalParticipant();
   const room = useRoomContext();
-  const { cluster, isMicSource, micSourceId, existingCluster, mergeTarget, startRoom, joinRoom } = useCluster();
+  const { cluster, isMicSource, micSourceId, members, existingCluster, mergeTarget, startRoom, joinRoom } = useCluster();
   const { entryHoldPending } = useRoomEntryHold();
   const bestMicAppliedRef = useRef(false);
   const enteredRef = useRef(false);
   // Only log the mic-gate decision when it actually changes (see applyMic below).
   const micGateRef = useRef("");
+  // Start times of the two mic fail-safe windows (fail-open entry, founder settle),
+  // so computeMicLive can time-release them. See the mic-gating effect.
+  const entryStartedAtRef = useRef(null);
+  const foundedAtRef = useRef(null);
   const inRoom = !!choices?.inRoom;
   // Sticky "we've actually been in a cluster this call". `inRoom` is a STATIC
   // pre-join intent that stays true after you leave the room's audio (leaveRoom
@@ -430,10 +435,13 @@ function PublishController({ publish, choices, micMuted }) {
     return () => { room.off(RoomEvent.Connected, applyRole); room.off(RoomEvent.Reconnected, applyRole); };
   }, [localParticipant, room, publish]);
 
-  // Camera — join choices + connect/reconnect only. In-call camera toggles
-  // (TrackToggle) are NOT reset when micMuted or cluster state changes.
-  // Re-running setCameraEnabled off stale join-time `choices.videoEnabled`
-  // was force-killing a camera turned on mid-call.
+  // Camera — apply join choices at CONNECT only, never on reconnect. In-call
+  // camera toggles (TrackToggle) never update the app's `choices`, so re-applying
+  // the stale join-time `choices.videoEnabled` on RoomEvent.Reconnected silently
+  // clobbered a mid-call toggle — turning a privacy-off camera back ON (or
+  // dropping a deliberately-enabled one) on every transient network blip. LiveKit
+  // already preserves live local tracks on a resume and republishes the currently
+  // -live tracks on a full reconnect, so re-applying is both unnecessary and wrong.
   useEffect(() => {
     if (!localParticipant || !room) return undefined;
     const applyCamera = () => {
@@ -443,31 +451,47 @@ function PublishController({ publish, choices, micMuted }) {
         .catch(() => { /* device denied/unavailable — stay subscribe-only */ });
     };
     room.on(RoomEvent.Connected, applyCamera);
-    room.on(RoomEvent.Reconnected, applyCamera);
     if (room.state === "connected") applyCamera();
-    return () => { room.off(RoomEvent.Connected, applyCamera); room.off(RoomEvent.Reconnected, applyCamera); };
+    return () => { room.off(RoomEvent.Connected, applyCamera); };
   }, [localParticipant, room, publish, choices?.videoEnabled, choices?.videoDeviceId]);
 
   // Mic gating — re-applied on connect AND whenever the room-audio cluster state
-  // changes (the "behind the scenes" auto-mute). Touches ONLY the mic.
+  // changes (the "behind the scenes" auto-mute). Touches ONLY the mic. The
+  // decision itself lives in computeMicLive (pure + unit-tested in audioGate.test)
+  // so the anti-echo / anti-permanent-mute rules are verifiable without devices.
+  const memberCount = members?.length ?? 1;
   useEffect(() => {
     if (!localParticipant || !room) return undefined;
+
+    // Track the two fail-safe windows' START times so computeMicLive can time-
+    // release them (refs, so re-runs preserve the origin):
+    //   • fail-open entry — a lost founding/join write leaves `cluster` null; the
+    //     hold releases ENTRY_FAILOPEN_MS after entry began so you're not muted
+    //     for the whole call (#7 companion permanent-mute).
+    //   • founder settle — a freshly self-founded SOLO cluster holds its mic until
+    //     a co-located peer appears (memberCount > 1) or FOUNDER_SETTLE_MS elapses,
+    //     so two simultaneous founders don't echo (#8).
+    const entering = publish && inRoom && !clusteredRef.current && !cluster;
+    if (entering) { if (entryStartedAtRef.current == null) entryStartedAtRef.current = Date.now(); }
+    else entryStartedAtRef.current = null;
+    const selfFoundedSolo = !!cluster && isMicSource && memberCount <= 1;
+    if (selfFoundedSolo) { if (foundedAtRef.current == null) foundedAtRef.current = Date.now(); }
+    else foundedAtRef.current = null;
+
+    let timer = null;
     const applyMic = () => {
-      // Your mic is live only when YOU haven't muted it AND (solo, or you're the
-      // room's mic source). While ENTERING "in this room" but not yet clustered,
-      // hold the mic off so it can't squeal before the follower/mic-source role
-      // resolves — but NOT after you've been in a cluster and left (clusteredRef),
-      // where "in this room" lingers. Manual re-entry sets entryHoldPending for
-      // the same pre-cluster safety window.
+      const now = Date.now();
+      const wantAudio = computeMicLive({
+        publish, micMuted, cluster, isMicSource, memberCount,
+        inRoom, clustered: clusteredRef.current, entryHoldPending,
+        entryStartedAt: entryStartedAtRef.current,
+        foundedAt: foundedAtRef.current,
+        now,
+      });
+      // Trace WHY the mic is (or isn't) live — the single source of truth for "my
+      // mic played through the room when it shouldn't have". Logged only on change.
       const holdForEntry = entryHoldPending || (inRoom && !clusteredRef.current);
-      const wantAudio = publish && !micMuted && (cluster ? isMicSource : !holdForEntry);
-      // Trace WHY the mic is (or isn't) live — the single source of truth for
-      // "my mic played through the room when it shouldn't have". A surprising log
-      // is `wantAudio:true` while you believe you're a muted follower: it'll show
-      // either `inCluster:false` (you never joined the room's shared audio) or
-      // `isMicSource:true` (you hold the room mic — founded it, were auto-promoted,
-      // or Auto-switch-mic claimed it). Logged only when the decision changes.
-      const sig = `${wantAudio}|${!!cluster}|${isMicSource}|${micMuted}|${holdForEntry}`;
+      const sig = `${wantAudio}|${!!cluster}|${isMicSource}|${micMuted}|${holdForEntry}|${memberCount}`;
       if (sig !== micGateRef.current) {
         micGateRef.current = sig;
         logAudioEvent("mic-gate", { wantAudio, publish, micMuted, inCluster: !!cluster, isMicSource, micSourceId, holdForEntry });
@@ -475,12 +499,30 @@ function PublishController({ publish, choices, micMuted }) {
       localParticipant
         .setMicrophoneEnabled(wantAudio, choices?.audioDeviceId ? { deviceId: choices.audioDeviceId } : undefined)
         .catch(() => { /* */ });
+
+      // A time-based hold (fail-open / founder settle) releases later — re-run
+      // applyMic when the nearest window elapses so the mic un-holds on its own,
+      // without needing an unrelated state change to trigger it.
+      if (timer) { clearTimeout(timer); timer = null; }
+      const releases = [];
+      if (!cluster && holdForEntry && entryStartedAtRef.current != null) {
+        releases.push(entryStartedAtRef.current + ENTRY_FAILOPEN_MS - now);
+      }
+      if (foundedAtRef.current != null && memberCount <= 1) {
+        releases.push(foundedAtRef.current + FOUNDER_SETTLE_MS - now);
+      }
+      const wait = releases.filter((d) => d > 0).sort((a, b) => a - b)[0];
+      if (wait != null) timer = setTimeout(applyMic, wait + 30);
     };
     room.on(RoomEvent.Connected, applyMic);
     room.on(RoomEvent.Reconnected, applyMic);
     if (room.state === "connected") applyMic();
-    return () => { room.off(RoomEvent.Connected, applyMic); room.off(RoomEvent.Reconnected, applyMic); };
-  }, [localParticipant, room, publish, micMuted, cluster, isMicSource, inRoom, choices?.audioDeviceId, entryHoldPending]);
+    return () => {
+      if (timer) clearTimeout(timer);
+      room.off(RoomEvent.Connected, applyMic);
+      room.off(RoomEvent.Reconnected, applyMic);
+    };
+  }, [localParticipant, room, publish, micMuted, cluster, isMicSource, memberCount, inRoom, choices?.audioDeviceId, entryHoldPending]);
 
   // Hard follower mic-lock — the backstop for "my mic played through the room".
   // The gate above is REACTIVE: it recomputes wantAudio when its inputs change,
@@ -705,8 +747,7 @@ function ClusterAudioRenderer({ publish = true, listen = true, deafened = false,
     return () => clearTimeout(t);
   }, [holdForEntry, entered]);
   const hold = entryHoldPending || (holdForEntry && !entered);
-  const isFollower = (!!cluster && !isAudioSink) || (hold && !cluster);
-  const shouldHear = (publish || listen) && !deafened && !isFollower;
+  const shouldHear = shouldHearRoomAudio({ publish, listen, deafened, cluster, isAudioSink, hold });
   return <RoomAudioRenderer muted={!shouldHear} />;
 }
 
@@ -986,11 +1027,10 @@ function DeviceSettingsMenu({ kind, label, children }) {
 // popover shows who's together and a Leave action.
 function RoomClusterButton({ autoMic, onToggleAutoMic }) {
   const {
-    cluster, members, isMicSource, isAudioSink, existingCluster,
+    cluster, members, isMicSource, isAudioSink, existingCluster, roles,
     startRoom, joinRoom, takeSpeaker, stepDown, takeSink, releaseSink, leaveRoom,
   } = useCluster();
   const { beginEntryHold } = useRoomEntryHold();
-  const roles = useClusterRoles();
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
   useEffect(() => {
@@ -1801,13 +1841,13 @@ function CallAvatar({ name, src, id, size = 34, speaking = false, dimmed = false
 // in the shared cluster-roles map (so it reflects the EFFECTIVE leader, e.g.
 // after a take-over). Wraps the default tile in a flex box and lets it fill, so
 // the grid layout is unaffected.
-function ClusterParticipantTile({ trackRef: trackRefProp }) {
+const ClusterParticipantTile = memo(function ClusterParticipantTile({ trackRef: trackRefProp }) {
   // Our layout engine passes the track ref explicitly; inside a LiveKit layout
   // it comes from context. Either way ParticipantTile gets it as a prop.
   const ctxTrackRef = useMaybeTrackRefContext();
   const trackRef = trackRefProp || ctxTrackRef;
   const participant = trackRef?.participant;
-  const roles = useClusterRoles();
+  const { roles } = useCluster();
   const globalPinId = useGlobalPin();
   const { canPin, pin, unpin, busyId } = useContext(PinControlContext);
   const { raisedIds, order: handOrder } = useContext(HandRaiseContext);
@@ -2076,7 +2116,12 @@ function ClusterParticipantTile({ trackRef: trackRefProp }) {
       )}
     </div>
   );
-}
+}, (a, b) => refKey(a.trackRef) === refKey(b.trackRef));
+// memo(refKey): the Stage re-renders on every active-speaker transition (several
+// times/sec in conversation) and rebuilds the tiles array with fresh elements.
+// Active-speaker changes do NOT touch the cluster context, so tiles whose track
+// identity is unchanged now skip that parent-driven re-render — their own
+// useIsSpeaking/quality subscriptions still update the ring and dot.
 
 function useSize(ref) {
   const [size, setSize] = useState({ w: 0, h: 0 });
@@ -2858,6 +2903,23 @@ export default function LiveKitCall({ roomId, displayName, compact, publish = tr
     if (next) setMicMuted(true); // deafening also mutes your mic
   };
 
+  // Spectate→Join re-seed. In the watch→join flow this component stays mounted
+  // (publish flips false→true, choices updates in the same render) so micMuted's
+  // one-time useState seed keeps its stale spectate value — a "Join muted" choice
+  // was ignored and the user joined with a HOT mic. Re-seed from the new choices
+  // on the publish false→true edge ONLY, so fresh green-room joins (correct at
+  // mount) and in-call user mute toggles (publish already true) are untouched.
+  //
+  // Done DURING RENDER (not in an effect): React re-renders with the corrected
+  // micMuted before committing, so PublishController's mic-gate child effect runs
+  // this same commit with the muted value — an effect would leave a one-commit
+  // window where the mic gate saw the stale (open) value first: a hot-mic flash.
+  const prevPublishRef = useRef(publish);
+  if (prevPublishRef.current !== publish) {
+    prevPublishRef.current = publish;
+    if (publish) setMicMuted(choices?.audioEnabled === false);
+  }
+
   useEffect(() => {
     let cancelled = false;
     setToken(null);
@@ -2880,7 +2942,7 @@ export default function LiveKitCall({ roomId, displayName, compact, publish = tr
             console.warn(`[livekit] token mint failed (room ${roomId}): ${msg}`);
             diagRecord(room, "token_error", { message: msg });
             noteConnectFailure();
-            onError?.(msg);
+            onError?.(msg, true); // recoverable → host routes through the rejoin ladder
           }
         }
       })();
@@ -2891,7 +2953,7 @@ export default function LiveKitCall({ roomId, displayName, compact, publish = tr
   }, [roomId]);
 
   if (!LIVEKIT_URL) {
-    onError?.("LiveKit is not configured (missing VITE_LIVE_KIT_URL)");
+    onError?.("LiveKit is not configured (missing VITE_LIVE_KIT_URL)", false); // permanent config error → terminal card
     return null;
   }
 
@@ -2962,7 +3024,7 @@ export default function LiveKitCall({ roomId, displayName, compact, publish = tr
           diagRecord(liveKitRoomName(roomId), "error", { message: msg });
           console.warn(`[livekit] room error (room ${roomId}): ${msg}`);
           noteConnectFailure();
-          onError?.(msg);
+          onError?.(msg, true); // recoverable → rejoin ladder (host only acts if not yet connected)
         }}
       >
         <RoomClusterProvider>

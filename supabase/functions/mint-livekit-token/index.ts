@@ -8,6 +8,12 @@
 // the authenticated uid — a client can supply a display name + room but
 // cannot impersonate.
 //
+// Guests: an anonymous-auth user (invited via a room share link) may ONLY mint
+// a token for a room it holds a live room_guests grant for. This both enables
+// external guests AND closes the prior hole where any anonymous JWT could mint a
+// full-publish token for any room. Guests keep full A/V grants (they're meeting
+// participants); the "call only" scoping is enforced by RLS, not the token.
+//
 // Body:
 //   { room: string, display_name?: string, ttl_seconds?: number }
 //
@@ -84,6 +90,37 @@ Deno.serve(async (req) => {
     return json(400, { error: "room is required" });
   }
 
+  // Guest gate. An anonymous user must hold a live room_guests grant for the
+  // requested room (minted by resolve_room_by_guest_token). "guest reads own
+  // grant" RLS lets the caller read its own row, so this is authoritative — a
+  // guest can't pivot to a room it wasn't invited to, and a bare anonymous
+  // session with no grant can't mint anything.
+  let guestTtlCap: number | null = null;
+  if (user.is_anonymous) {
+    const roomId = room.replace(/^mangodoro-/, "");
+    if (roomId === room) {
+      return json(403, { error: "Guests can only join a room via an invite link" });
+    }
+    const { data: grant } = await supabase
+      .from("room_guests")
+      .select("expires_at")
+      .eq("user_id", user.id)
+      .eq("room_id", roomId)
+      .maybeSingle();
+    if (!grant) {
+      return json(403, { error: "No valid guest invite for this room" });
+    }
+    if (grant.expires_at) {
+      const secs = Math.floor(
+        (new Date(grant.expires_at as string).getTime() - Date.now()) / 1000,
+      );
+      if (secs <= 0) {
+        return json(403, { error: "This guest invite has expired" });
+      }
+      guestTtlCap = secs;
+    }
+  }
+
   // A device account may only get a token for ITS OWN pinned room. org_devices
   // is service-role-write only and "device reads self" RLS lets the caller read
   // its own row, so this is authoritative (unlike self-editable user_metadata).
@@ -98,10 +135,14 @@ Deno.serve(async (req) => {
   }
 
   // Cap the TTL (1m–12h). The client re-mints on re-entry anyway.
-  const ttl = Math.min(
+  let ttl = Math.min(
     Math.max(60, body.ttl_seconds ?? 6 * 60 * 60),
     12 * 60 * 60,
   );
+  // A guest token never outlives its grant.
+  if (guestTtlCap != null) {
+    ttl = Math.min(ttl, guestTtlCap);
+  }
 
   try {
     const { token, exp } = await signLiveKitToken({

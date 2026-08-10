@@ -7,6 +7,7 @@ import { useApp } from "../../context/AppContext";
 import { useTeam } from "../../context/TeamContext";
 import { getProfiles } from "../../lib/profiles";
 import { createScheduledMeeting, updateScheduledMeeting, deleteScheduledMeeting } from "../../lib/scheduledMeetings";
+import { ensureGuestJoinLink, buildMeetingCalendarFields } from "../../lib/rooms";
 import MeetingTimezones from "../calendar/MeetingTimezones";
 
 // Book a meeting into this room, optionally mirrored to the creator's Google
@@ -111,16 +112,36 @@ export default function ScheduleMeetingModal({ room, rooms, teamId, dark, initia
     const emails = externalEmails.split(",").map((s) => s.trim()).filter(Boolean);
 
     setBusy(true); setError("");
+
+    // External-guest join link: when the meeting has outside attendees, mint (or
+    // reuse) a room guest link so those emails get a one-click way in. Fails soft
+    // if the scheduler isn't a room manager — the meeting still saves. If the room
+    // CHANGED on edit, drop the old link so we mint one for the new room (else the
+    // calendar/attendees would point at the previous room).
+    const roomChanged = editing && meeting?.room_id && effRoom?.id && meeting.room_id !== effRoom.id;
+    let guestLinkId = roomChanged ? null : (meeting?.guest_link_id || null);
+    let guestJoinUrl = roomChanged ? null : (meeting?.guest_join_url || null);
+    if (emails.length > 0 && effRoom?.id && !guestJoinUrl) {
+      const link = await ensureGuestJoinLink(effRoom.id, { label: title.trim() });
+      guestLinkId = link.id;
+      guestJoinUrl = link.url;
+    }
+    const cal = buildMeetingCalendarFields({
+      description: description.trim(), roomName: effRoom?.name, joinUrl: guestJoinUrl,
+    });
+
     let googleEventId = meeting?.google_event_id || null;
     let googleHtmlLink = meeting?.google_html_link || null;
     if (addToCalendar && hasGoogle) {
       if (googleEventId) {
-        // Existing event — patch it in place.
-        await updateCalendarEvent(googleEventId, { start, end, summary: title.trim(), description: description.trim() });
+        // Existing event — patch it in place (incl. the join link).
+        await updateCalendarEvent(googleEventId, {
+          start, end, summary: title.trim(), description: cal.description || "", location: cal.location,
+        });
       } else {
         const ev = await createCalendarEvent({
-          summary: title.trim(), description: description.trim() || undefined,
-          start, end, attendees: emails, location: effRoom?.name,
+          summary: title.trim(), description: cal.description,
+          start, end, attendees: emails, location: cal.location,
         });
         // ev is null if the token needed re-consent (a redirect is under way).
         if (!ev) { setBusy(false); return; }
@@ -141,6 +162,8 @@ export default function ScheduleMeetingModal({ room, rooms, teamId, dark, initia
       attendee_emails: emails,
       google_event_id: googleEventId,
       google_html_link: googleHtmlLink,
+      guest_link_id: guestLinkId,
+      guest_join_url: guestJoinUrl,
     };
     const { error: saveErr } = editing
       ? await updateScheduledMeeting(meeting.id, payload)

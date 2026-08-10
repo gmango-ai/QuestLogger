@@ -56,8 +56,8 @@ function DeviceMediaPicker({ kind, label, storageKey }) {
   );
 }
 import { LIVEKIT_URL, fetchLiveKitToken, liveKitRoomName } from "../../lib/livekit";
-import { getLkRoomOptions, LK_CONNECT_OPTIONS, connectDelayFor, markConnectAttempt } from "./livekitConnect";
-import { ATTR_CLUSTER, ATTR_LEADER, ATTR_ROOM_DEVICE, ATTR_SINK_OFF, pickMicSource, pickAudioSink } from "./useRoomCluster";
+import { getLkRoomOptions, LK_CONNECT_OPTIONS, connectDelayFor, markConnectAttempt, connectCooldownMs, noteConnectFailure } from "./livekitConnect";
+import { ATTR_CLUSTER, ATTR_LEADER, ATTR_ROOM_DEVICE, ATTR_SINK_OFF, resolveDeviceRoles } from "./useRoomCluster";
 import AdaptiveStage from "./AdaptiveStage";
 import { useFeaturedSpeaker } from "./useFeaturedSpeaker";
 import { useGlobalPin } from "./useGlobalPin";
@@ -141,25 +141,49 @@ function DeviceClusterBeacon() {
 // The device's current room roles. Either goes false once someone in the room
 // takes over that role: the device then pauses its mic / speakers so two mics
 // or two speakers in one space don't conflict.
+const DEVICE_ROLE_SETTLE_MS = 1500;
+
 function useDeviceRoles() {
   const room = useRoomContext();
   const participants = useParticipants();
   const [, bump] = useReducer((n) => (n + 1) % 1e9, 0);
+  // Fresh device: assume it's the room's mic + sink until told otherwise. Held
+  // across reconnects so a mid-reconnect participant-list flicker (collapse to
+  // nothing, or to just the kiosk) can't flip it back to mic source under a
+  // human who took it over (echo).
+  const lastRolesRef = useRef({ isMicSource: true, isAudioSink: true });
+  // When the room last became connected — starts the self-only settle window.
+  const [connectedAt, setConnectedAt] = useState(null);
   useEffect(() => {
     if (!room) return undefined;
+    const onState = () => {
+      setConnectedAt((prev) => (room.state === "connected" ? (prev ?? Date.now()) : null));
+      bump();
+    };
     room.on(RoomEvent.ParticipantAttributesChanged, bump);
+    room.on(RoomEvent.ConnectionStateChanged, onState);
+    onState(); // initialise from the current state
     return () => {
       room.off(RoomEvent.ParticipantAttributesChanged, bump);
+      room.off(RoomEvent.ConnectionStateChanged, onState);
     };
   }, [room]);
+  // Re-evaluate once the settle window elapses, so a genuine "everyone left"
+  // (still self-only after the settle) lets the kiosk reclaim the mic.
+  useEffect(() => {
+    if (connectedAt == null) return undefined;
+    const t = setTimeout(bump, DEVICE_ROLE_SETTLE_MS + 100);
+    return () => clearTimeout(t);
+  }, [connectedAt]);
   const myId = room?.localParticipant?.identity;
-  // Assume both until we know otherwise (avoids cutting out on connect).
-  if (!myId) return { isMicSource: true, isAudioSink: true };
   // The device's cluster id is its own identity (set by the beacon).
   const members = participants.filter((p) => p.attributes?.[ATTR_CLUSTER] === myId);
-  if (!members.length) return { isMicSource: true, isAudioSink: true };
-  const micId = pickMicSource(members);
-  return { isMicSource: micId === myId, isAudioSink: pickAudioSink(members, micId) === myId };
+  const roles = resolveDeviceRoles({
+    myId, roomState: room?.state, members, lastRoles: lastRolesRef.current,
+    connectedSince: connectedAt, now: Date.now(), settleMs: DEVICE_ROLE_SETTLE_MS,
+  });
+  lastRolesRef.current = roles;
+  return roles;
 }
 
 // TV conferencing stage. Small calls use an even grid; once there are 3+
@@ -554,28 +578,60 @@ function DeviceCallIdle() {
 export default function DevicePortalCall({ roomId, displayName, active = true }) {
   const [token, setToken] = useState(null);
   const [failed, setFailed] = useState(false);
+  // Bumped to force a fresh mint+connect (a backoff retry, an involuntary
+  // disconnect, or connectivity returning). A kiosk has no human to recover it,
+  // so it must reconnect itself.
+  const [nonce, bumpNonce] = useReducer((n) => (n + 1) & 0xffff, 0);
+  const retryRef = useRef(0);
+  const retryTimerRef = useRef(null);
+  // Latest `active`, read inside onDisconnected: a teardown when `active` flips
+  // off (LiveKitRoom unmounts) must never be treated as an involuntary drop.
+  const activeRef = useRef(active);
+  activeRef.current = active;
 
   useEffect(() => {
     // Only mint a token + connect while `active` (someone's in the call). When
     // idle, tear the token down so the LiveKitRoom below unmounts and the media
     // connection closes — the resource saving.
-    if (!active) { setToken(null); setFailed(false); return undefined; }
+    if (!active) { setToken(null); setFailed(false); retryRef.current = 0; return undefined; }
     if (!roomId || !LIVEKIT_URL) { setFailed(true); return undefined; }
     let cancelled = false;
     setToken(null);
     setFailed(false);
     const room = liveKitRoomName(roomId);
     // Same connection throttle as the app call: don't re-mint/reconnect to the
-    // same room inside the cooldown (kiosk reloads can otherwise churn).
+    // same room inside the cooldown, and honour the global 429 breaker.
     const timer = setTimeout(() => {
       if (cancelled) return;
       markConnectAttempt(room);
       fetchLiveKitToken(room, displayName)
-        .then((t) => { if (!cancelled) setToken(t); })
-        .catch(() => { if (!cancelled) setFailed(true); });
-    }, connectDelayFor(room));
-    return () => { cancelled = true; clearTimeout(timer); };
-  }, [roomId, displayName, active]);
+        .then((t) => { if (!cancelled) { retryRef.current = 0; setToken(t); } })
+        .catch(() => {
+          if (cancelled) return;
+          // Auto-retry with backoff instead of dead-ending on "Could not connect"
+          // forever — during a brownout the kiosk keeps trying until it clears.
+          noteConnectFailure();
+          setFailed(true); // show the connecting-failed state meanwhile
+          retryRef.current = Math.min(retryRef.current + 1, 8);
+          const backoff = Math.min(30000, 1000 * 2 ** retryRef.current);
+          if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+          retryTimerRef.current = setTimeout(() => { if (!cancelled) bumpNonce(); }, backoff);
+        });
+    }, Math.max(connectDelayFor(room), connectCooldownMs()));
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      if (retryTimerRef.current) { clearTimeout(retryTimerRef.current); retryTimerRef.current = null; }
+    };
+  }, [roomId, displayName, active, nonce]);
+
+  // Retry promptly when connectivity returns (a new outage deserves a fresh try).
+  useEffect(() => {
+    if (!active) return undefined;
+    const onOnline = () => { retryRef.current = 0; bumpNonce(); };
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+  }, [active]);
 
   if (!active) return <DeviceCallIdle />;
   if (failed || !token) return (
@@ -596,6 +652,19 @@ export default function DevicePortalCall({ roomId, displayName, active = true })
         options={getLkRoomOptions()}
         connectOptions={LK_CONNECT_OPTIONS}
         style={{ height: "100%" }}
+        onError={() => { noteConnectFailure(); }}
+        onDisconnected={(reason) => {
+          // Re-mint on ANY involuntary drop LiveKit's own reconnect couldn't
+          // recover — INCLUDING one it reports with no reason (undefined), which
+          // is a plain transient drop (see endReasonForDisconnect), not a signal
+          // to freeze on a dead room. Skip only: a teardown while `active` is off
+          // (LiveKitRoom unmounting), and a client-initiated disconnect
+          // (reason === 1 — our own nonce-driven remount, which would otherwise
+          // loop). The kiosk has no human to recover it, so it reconnects itself.
+          if (!activeRef.current) return;
+          if (reason === 1) return; // DisconnectReason.CLIENT_INITIATED — intentional
+          setToken(null); bumpNonce();
+        }}
       >
         <DevicePortalInner />
       </LiveKitRoom>

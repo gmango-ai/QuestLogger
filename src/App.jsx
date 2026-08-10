@@ -60,6 +60,7 @@ const TeamTimesheetsPage = lazy(() => import("./pages/TeamTimesheetsPage"));
 const WhiteboardsListPage = lazy(() => import("./pages/WhiteboardsListPage"));
 const WhiteboardPage = lazy(() => import("./pages/WhiteboardPage"));
 const PublicWhiteboardPage = lazy(() => import("./pages/PublicWhiteboardPage"));
+const GuestRoomPage = lazy(() => import("./pages/GuestRoomPage"));
 const OfficePage = lazy(() => import("./pages/OfficePage"));
 const MeetingSummariesPage = lazy(() => import("./pages/MeetingSummariesPage"));
 const CalendarPage = lazy(() => import("./pages/CalendarPage"));
@@ -707,6 +708,10 @@ export default function App() {
               anyone with the link (even signed out) can view a scope='public'
               board. RLS returns the row only when it's public. */}
           <Route path="/w/:whiteboardId" element={<PublicWhiteboardPage />} />
+          {/* External guest join — renders OUTSIDE the auth gate. An invited
+              outsider signs in anonymously, redeems the token, and enters just
+              this one room's call + whiteboard (least-privilege guest mode). */}
+          <Route path="/office/guest/:token" element={<GuestRoomPage />} />
           <Route
             path="/*"
             element={isDevice ? <DeviceKioskPage session={session} /> : session ? <AuthenticatedApp session={session} /> : <LocalTimerPage />}

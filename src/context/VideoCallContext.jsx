@@ -51,12 +51,18 @@ function persistActiveCall(c) {
 function clearPersistedActiveCall() {
   try { sessionStorage.removeItem(ACTIVE_CALL_KEY); } catch { /* */ }
 }
-function loadPersistedActiveCall() {
+// ignoreAge: the RESTORE_MAX_AGE_MS gate exists to avoid rejoining a stale call
+// after a tab was reloaded following a long idle (sessionStorage survives reload).
+// The IN-SESSION rejoin path (a live tab whose call just dropped) must skip it —
+// otherwise a >30-min meeting that hiccups loses its auto-reconnect safety net,
+// even though the tab is demonstrably still alive. Only the mount-time restore
+// (a fresh page load) keeps the age gate.
+function loadPersistedActiveCall(ignoreAge = false) {
   try {
     const raw = sessionStorage.getItem(ACTIVE_CALL_KEY);
     if (!raw) return null;
     const s = JSON.parse(raw);
-    if (!s?.roomId || Date.now() - (s.ts || 0) > RESTORE_MAX_AGE_MS) return null;
+    if (!s?.roomId || (!ignoreAge && Date.now() - (s.ts || 0) > RESTORE_MAX_AGE_MS)) return null;
     // Rejoin with camera OFF + mic MUTED. An auto-restore happens without a user
     // gesture (a reload, or a recovered login), so silently turning the camera on
     // would be a privacy surprise. The user reconnects + hears the room (listen),
@@ -114,11 +120,12 @@ export function VideoCallProvider({ children }) {
   // the latest closure (which reads the current startCall) without re-binding.
   const attemptRejoinRef = useRef(null);
   attemptRejoinRef.current = (trigger) => {
-    if (callRef.current) { rejoinTriesRef.current = 0; return; } // already back
+    if (callRef.current) return; // a call is active/connecting — don't start another
+                                 // (budget resets on a CONFIRMED connect, not on truthiness)
     // A hidden tab throttles timers and can't usefully connect media — wait for
     // it to foreground (the visibilitychange listener re-attempts then).
     if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-    const restore = loadPersistedActiveCall(); // null → user left / kicked / stale
+    const restore = loadPersistedActiveCall(true); // in-session (live tab) → skip the age gate; null → user left / kicked
     if (!restore) { rejoinTriesRef.current = 0; clearRejoinTimer(); return; }
     if (rejoinTriesRef.current >= AUTO_REJOIN_MAX_TRIES) return;
     rejoinTriesRef.current += 1;
@@ -133,7 +140,7 @@ export function VideoCallProvider({ children }) {
   scheduleRejoinRef.current = (trigger) => {
     if (rejoinTimerRef.current || callRef.current) return;
     if (rejoinTriesRef.current >= AUTO_REJOIN_MAX_TRIES) return;
-    if (!loadPersistedActiveCall()) return; // nothing (recoverable) to rejoin
+    if (!loadPersistedActiveCall(true)) return; // nothing (recoverable) to rejoin (in-session → skip age gate)
     const delay = Math.min(AUTO_REJOIN_MAX_DELAY_MS, AUTO_REJOIN_BASE_DELAY_MS * 2 ** rejoinTriesRef.current);
     rejoinTimerRef.current = setTimeout(() => {
       rejoinTimerRef.current = null;
@@ -141,9 +148,33 @@ export function VideoCallProvider({ children }) {
     }, delay);
   };
 
-  // A call became active → the reconnect (or fresh join) stuck; reset the budget.
+  // A CONFIRMED media connection (onJoined) stuck → the outage is over, reset the
+  // backoff budget. Called from PersistentVideoCall's onJoined. Crucially this is
+  // NOT tied to `call` truthiness: `call` is truthy the instant a rejoin STARTS,
+  // before it connects, so resetting on truthiness let a rejoin whose token mint
+  // keeps failing loop forever without ever backing off or exhausting its budget.
+  const markConnected = useCallback(() => {
+    rejoinTriesRef.current = 0;
+    clearRejoinTimer();
+    // Refresh the marker's timestamp so "time since active" — not "time since
+    // first join" — drives the mount-restore age gate; a long call that stays
+    // connected keeps a fresh marker.
+    if (callRef.current) persistActiveCall(callRef.current);
+  }, []);
+
+  // React to `call` transitions to arm/disarm the in-session rejoin.
+  //  • call truthy  → a call is connecting/active; cancel any pending rejoin timer
+  //    (do NOT reset the budget — only markConnected does, on a real connect).
+  //  • call → null  → if a recoverable marker is still present (a network drop or
+  //    a connect-time failure routed through endCall("livekit-disconnected")),
+  //    arm the bounded backoff rejoin HERE. Scheduling it synchronously inside
+  //    endCall bailed because callRef is still stale-truthy until the next render.
+  const prevCallRef = useRef(call);
   useEffect(() => {
-    if (call) { rejoinTriesRef.current = 0; clearRejoinTimer(); }
+    const had = prevCallRef.current;
+    prevCallRef.current = call;
+    if (call) { clearRejoinTimer(); return; }
+    if (had && loadPersistedActiveCall(true)) scheduleRejoinRef.current?.("dropped");
   }, [call]);
 
   // Rejoin on connectivity/foreground recovery. `online` gets a fresh try budget
@@ -217,9 +248,9 @@ export function VideoCallProvider({ children }) {
     setPoppedOut(false);
     setMaximized(false);
     setHideChrome(false);
-    // Involuntary drop with the marker intact → kick off the bounded, backoff
-    // auto-rejoin (reconnects camera-off + mic-muted via loadPersistedActiveCall).
-    if (recoverable) scheduleRejoinRef.current?.("dropped");
+    // The bounded backoff auto-rejoin (for a recoverable drop, marker intact) is
+    // armed by the [call] effect once `call` flips to null — scheduling it here
+    // would bail, because callRef is still stale-truthy until the next render.
   }, []);
 
   // Patch the live call without re-creating it — used to flip a spectator
@@ -237,11 +268,11 @@ export function VideoCallProvider({ children }) {
 
   const value = useMemo(
     () => ({
-      call, stageEl, startCall, endCall, updateCall, setStageEl,
+      call, stageEl, startCall, endCall, updateCall, setStageEl, markConnected,
       poppedOut, setPoppedOut, canPopOut, setCanPopOut, popOut, popIn, registerPopout,
       maximized, setMaximized, hideChrome, setHideChrome,
     }),
-    [call, stageEl, startCall, endCall, updateCall, setStageEl,
+    [call, stageEl, startCall, endCall, updateCall, setStageEl, markConnected,
       poppedOut, canPopOut, popOut, popIn, registerPopout, maximized, hideChrome],
   );
 
