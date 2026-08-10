@@ -252,6 +252,43 @@ export async function saveSnapshot(whiteboardId, snapshot) {
   return { error };
 }
 
+// Access token cached synchronously so the exit-path beacon (which must run
+// inside a pagehide/visibilitychange handler, with no chance to await) can
+// authenticate. getSession() is async and won't resolve before the page dies.
+let _wbAccessToken = null;
+supabase.auth.getSession().then(({ data }) => { _wbAccessToken = data?.session?.access_token || null; }).catch(() => {});
+supabase.auth.onAuthStateChange((_e, session) => { _wbAccessToken = session?.access_token || null; });
+
+// Durable "save on the way out". A normal supabase-js update() is cancelled the
+// moment the page unloads/backgrounds, and on iOS/iPadOS Safari `beforeunload`
+// never fires at all — so the last edits before closing a tab or swiping the
+// app away were silently lost. A `keepalive` fetch survives unload and PATCHes
+// the snapshot straight to PostgREST with the user's RLS token. Best-effort,
+// synchronous, returns a bool. Caveat: keepalive bodies are capped at ~64KB, so
+// a very large board falls back to whatever the routine debounced save persisted.
+export function saveSnapshotBeacon(whiteboardId, snapshot) {
+  if (!whiteboardId || !_wbAccessToken) return false;
+  const url = import.meta.env.VITE_SUPABASE_URL;
+  const anon = import.meta.env.VITE_SUPABASE_ANON_KEY;
+  if (!url || !anon) return false;
+  try {
+    fetch(`${url}/rest/v1/whiteboards?id=eq.${encodeURIComponent(whiteboardId)}`, {
+      method: "PATCH",
+      keepalive: true,
+      headers: {
+        "Content-Type": "application/json",
+        apikey: anon,
+        Authorization: `Bearer ${_wbAccessToken}`,
+        Prefer: "return=minimal",
+      },
+      body: JSON.stringify({ snapshot }),
+    }).catch(() => {});
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function setWhiteboardGoal(whiteboardId, goal) {
   const { error } = await supabase
     .from("whiteboards")

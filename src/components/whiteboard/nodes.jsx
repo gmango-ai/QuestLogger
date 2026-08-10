@@ -381,6 +381,13 @@ function useNodeDataPatcher(id) {
 // arrows. Null when unavailable (e.g. the read-only kiosk).
 export const QuickConnectContext = createContext(null);
 
+// The id of the board these nodes belong to. GoalNode needs the *real* board id
+// to key its goal upsert (source_board, source_node); reading it from the route
+// (useParams) is wrong when the board is embedded in a room panel, where the
+// route has no :whiteboardId — a null board id defeats the upsert's dedupe and
+// creates a duplicate goal on every save. Provided by WhiteboardEditor.
+export const BoardIdContext = createContext(null);
+
 // Directional arrows around a shape (shown on hover/select). They are real
 // React Flow connection Handles, so ONE affordance does both gestures:
 //   • CLICK  → drops a connected, parent-matching shape on that side.
@@ -995,7 +1002,12 @@ export const GoalNode = memo(function GoalNode({ id, data, selected }) {
   const patch = useNodeDataPatcher(id);
   const { theme } = useTheme();
   const { orgTeams = [], teamMembers = [], activeTeamId } = useTeam() || {};
-  const { whiteboardId } = useParams();
+  const { whiteboardId: routeBoardId } = useParams();
+  const ctxBoardId = useContext(BoardIdContext);
+  // Prefer the board id from context (correct in both the standalone route and
+  // the embedded room panel). Fall back to the route param only if context is
+  // somehow absent. A missing board id would break the goal upsert's dedupe.
+  const whiteboardId = ctxBoardId || routeBoardId;
   const [pickerOpen, setPickerOpen] = useState(false);
   const [tfOpen, setTfOpen] = useState(false);
   const linked = data?.linkType && data?.linkId;
@@ -1019,6 +1031,10 @@ export const GoalNode = memo(function GoalNode({ id, data, selected }) {
   const lastSyncRef = useRef("");
   useEffect(() => {
     if (!activeTeamId) return;
+    // Never write a goal without a board id — the (source_board, source_node)
+    // upsert can't dedupe on a NULL board, so it would insert a fresh duplicate
+    // on every save/remount (the meeting-context duplicate-goal bug).
+    if (!whiteboardId) return;
     const sig = linked && body ? `${data.linkType}:${data.linkId}:${timeframe}:${body}` : "";
     if (sig === lastSyncRef.current) return;
     const t = setTimeout(async () => {

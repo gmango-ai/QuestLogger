@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import {
   fetchWhiteboardById,
   saveSnapshot,
+  saveSnapshotBeacon,
   templateSnapshotFor,
   isEmptySnapshot,
 } from "../../lib/whiteboard";
@@ -49,6 +50,7 @@ export function useWhiteboardPersistence({
   const nodesRef = useRef(nodes); nodesRef.current = nodes;
   const edgesRef = useRef(edges); edgesRef.current = edges;
   const canPersistRef = useRef(canPersist); canPersistRef.current = canPersist;
+  const prevCanPersistRef = useRef(canPersist); // previous persister status (updated inside the save effect)
 
   // ── load board metadata + snapshot, seed template if empty ──
   useEffect(() => {
@@ -127,11 +129,25 @@ export function useWhiteboardPersistence({
     // Not the persister: our edits propagate live via broadcast and the persister
     // durably saves them — issue ZERO DB writes here.
     if (!canPersist) {
+      const wasPersister = prevCanPersistRef.current;
+      prevCanPersistRef.current = false;
       if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
+      // Handoff: if we JUST lost persister status (this exact transition) with an
+      // unsaved edit, checkpoint it ONCE so durability doesn't hinge on the lossy
+      // sync-req broadcast reaching the new writer. Guarded by wasPersister so it
+      // fires only on the edge — never per-edit, so no write storm.
+      if (wasPersister && board?.id) {
+        const snap = { nodes: nodesRef.current, edges: edgesRef.current };
+        const serialized = JSON.stringify(snap);
+        if (serialized !== lastSavedRef.current) {
+          saveSnapshot(board.id, snap).then(({ error: err }) => { if (!err) lastSavedRef.current = serialized; }).catch(() => {});
+        }
+      }
       pendingSinceRef.current = 0;
       setSaveState("saved");
       return undefined;
     }
+    prevCanPersistRef.current = true;
 
     async function flushSave() {
       saveTimerRef.current = null;
@@ -192,19 +208,33 @@ export function useWhiteboardPersistence({
   // flushes the latest state.
   useEffect(() => {
     if (readOnly) return undefined;
-    function flush() {
+    // `beacon` = leaving the page (close / background / tab-swipe): a normal
+    // fetch is cancelled on unload and never fires on iOS, so use the keepalive
+    // beacon. Otherwise (in-app unmount, page still alive) a normal save is fine.
+    function flush(beacon) {
       if (!canPersistRef.current || !board?.id) return;
-      if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
       const snap = { nodes: nodesRef.current, edges: edgesRef.current };
       const serialized = JSON.stringify(snap);
       if (serialized === lastSavedRef.current) return;
-      saveSnapshot(board.id, snap);
+      if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
+      if (beacon) saveSnapshotBeacon(board.id, snap);
+      else saveSnapshot(board.id, snap);
       lastSavedRef.current = serialized;
     }
-    window.addEventListener("beforeunload", flush);
+    const onBeforeUnload = () => flush(true);
+    const onPageHide = () => flush(true);
+    // visibilitychange:hidden is the ONLY signal that reliably fires on iOS/iPadOS
+    // Safari when the tab is backgrounded or the app swiped away. Save is a no-op
+    // when nothing changed, so firing on every backgrounding is safe.
+    const onVisibility = () => { if (document.visibilityState === "hidden") flush(true); };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    window.addEventListener("pagehide", onPageHide);
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
-      window.removeEventListener("beforeunload", flush);
-      flush();
+      window.removeEventListener("beforeunload", onBeforeUnload);
+      window.removeEventListener("pagehide", onPageHide);
+      document.removeEventListener("visibilitychange", onVisibility);
+      flush(false); // in-app unmount: page is still alive, normal save is reliable
     };
   }, [board?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 }

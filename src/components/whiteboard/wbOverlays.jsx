@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import { ViewportPortal } from "@xyflow/react";
 import { MessageSquare, X } from "lucide-react";
 import { nodeAbsPos } from "./frame";
@@ -8,7 +8,10 @@ import { nodeAbsPos } from "./frame";
 // you can cast the first one). Votes are a per-user map in node.data.votes
 // (`{ userId: 1 }`), so they sync + persist like any node data and each person
 // can add/remove only their own. One overlay covers every node type.
-export function VotesOverlay({ nodes, myId, onToggle, dark }) {
+// memo: props (nodes, myId, onToggle, dark) are referentially stable across the
+// editor's frequent re-renders, so this skips re-rendering + the full node scan
+// unless the nodes array actually changes.
+export const VotesOverlay = memo(function VotesOverlay({ nodes, myId, onToggle, dark }) {
   const byId = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
   const show = nodes.filter(
     (n) => n.type !== "zone" && n.type !== "frame" &&
@@ -56,7 +59,7 @@ export function VotesOverlay({ nodes, myId, onToggle, dark }) {
       })}
     </ViewportPortal>
   );
-}
+});
 
 // Short relative timestamp for comments ("just now" / "5m" / "2h" / "3d").
 function timeAgo(ts) {
@@ -71,7 +74,7 @@ function timeAgo(ts) {
 // Shown on any node with comments + the selected node (to start a thread).
 // Clicking toggles the thread open for that node. Comments live in
 // data.comments so they sync + persist like any node data.
-export function CommentsOverlay({ nodes, openId, onOpen, dark }) {
+export const CommentsOverlay = memo(function CommentsOverlay({ nodes, openId, onOpen, dark }) {
   const byId = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
   const show = nodes.filter(
     (n) => n.type !== "zone" && n.type !== "frame" &&
@@ -118,7 +121,7 @@ export function CommentsOverlay({ nodes, openId, onOpen, dark }) {
       })}
     </ViewportPortal>
   );
-}
+});
 
 // Thread popover (rendered in a NodeToolbar anchored to the node): the comment
 // list + an input. You can delete your own comments. Enter sends, Shift+Enter

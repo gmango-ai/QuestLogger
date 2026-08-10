@@ -16,7 +16,7 @@ import EmoteOverlay from "../emotes/EmoteOverlay";
 //                   life; PersistentVideoCall keys us by roomId).
 // displayName     — what other participants see.
 // onJoined/onLeft — fired when the local participant joins / leaves.
-export default function VideoCall({ roomId, displayName, compact, publish, listen, choices, chromeless, hideControls, onJoinIn, onJoined, onLeft }) {
+export default function VideoCall({ roomId, displayName, compact, publish, listen, choices, chromeless, hideControls, onJoinIn, onJoined, onLeft, onError }) {
   const { theme } = useTheme();
   const dark = theme === "dark";
   const [error, setError] = useState(null);
@@ -104,14 +104,20 @@ export default function VideoCall({ roomId, displayName, compact, publish, liste
     onLeft?.(reason, report);
   };
 
-  const handleError = (message) => {
-    setError(message);
+  const handleError = (message, recoverable) => {
     track("video_call_failed", {
       provider,
       room_id: roomId,
       is_mobile: isMobileClient(),
       error: message,
     });
+    // Recoverable (a connect-time token/room failure during a brownout): hand it
+    // to the host to route through the auto-rejoin ladder — do NOT show the
+    // terminal "Couldn't load the call" card, which would strand the user with no
+    // retry. Only a PERMANENT error (e.g. LiveKit not configured) shows the card.
+    if (recoverable) { onError?.(message, true); return; }
+    setError(message);
+    onError?.(message, false);
   };
 
   return (

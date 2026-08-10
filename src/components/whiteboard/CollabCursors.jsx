@@ -97,7 +97,7 @@ export function LaserTrail({ pointsRef, color = "#ef4444" }) {
   );
 }
 
-export function CollabCursors({ peers }) {
+export function CollabCursors({ subscribe }) {
   const { zoom } = useViewport();
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
@@ -109,9 +109,14 @@ export function CollabCursors({ peers }) {
   const [ids, setIds] = useState([]);
   const idsKey = useRef("");
 
-  // Fold incoming peer positions into targets + velocity estimates.
+  // Fold incoming peer positions into targets + velocity estimates. Driven by an
+  // imperative subscription (not a prop) so a peer moving their cursor never
+  // re-renders the editor; we only React-render here when the SET of peers or
+  // their laser-ness changes (swap the arrow ↔ laser-dot markup).
   useEffect(() => {
-    const next = peers || {};
+    if (!subscribe) return undefined;
+    const fold = (snapshot) => {
+    const next = snapshot || {};
     const keys = Object.keys(next);
     for (const id of keys) {
       const prev = targets.current[id];
@@ -138,7 +143,9 @@ export function CollabCursors({ peers }) {
     // swaps between the arrow and the glowing laser dot).
     const key = keys.map((id) => id + (next[id]?.laser ? "!" : "")).sort().join(",");
     if (key !== idsKey.current) { idsKey.current = key; setIds(keys); }
-  }, [peers]);
+    };
+    return subscribe(fold);
+  }, [subscribe]);
 
   // One rAF loop drives every cursor's transform imperatively.
   useEffect(() => {

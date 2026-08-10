@@ -1,7 +1,7 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { ViewportPortal } from "@xyflow/react";
-import { createPaintStore, applyPaintChunk, ensureTile, TILE_UNITS, TILE_PX, PX_PER_UNIT } from "./paintTiles";
-import { listPaintTiles, uploadPaintTile } from "../../lib/whiteboardPaint";
+import { createPaintStore, applyPaintChunk, ensureTile, reapStaleStrokes, evictTile, tileHasInk, planTileFlush, TILE_UNITS, TILE_PX, PX_PER_UNIT } from "./paintTiles";
+import { listPaintTiles, uploadPaintTile, deletePaintTiles } from "../../lib/whiteboardPaint";
 
 const FLUSH_DELAY_MS = 2000; // idle time before dirty tiles are saved to Storage
 
@@ -42,21 +42,32 @@ const PaintLayer = forwardRef(function PaintLayer({ boardId, enabled, zIndex = 5
   const flushTimer = useRef(0);
 
   // Save every dirty tile as a PNG (debounced). Idempotent upsert — last write
-  // wins, and since every client renders identical pixels they converge.
+  // wins, and since every client renders identical pixels they converge. Tiles a
+  // clear op wiped (store.clearedKeys) that are now empty are instead DELETED from
+  // Storage + evicted from memory, so blank tiles don't accumulate for the whole
+  // session or re-materialise on reload. The emptiness check runs only for those
+  // cleared tiles, so normal painting never pays a scan; and it's content-based
+  // at flush time, so an undo that re-drew a cleared tile is uploaded, not deleted.
   const doFlush = useCallback(() => {
     flushTimer.current = 0;
     const bId = boardRef.current;
     if (!bId) return;
-    for (const tile of storeRef.current.tiles.values()) {
-      if (!tile.dirty) continue;
-      tile.dirty = false;
+    const store = storeRef.current;
+    const { uploads, evict } = planTileFlush(store.tiles.values(), store.clearedKeys, tileHasInk);
+    store.clearedKeys = null;
+    for (const tile of uploads) {
       // toBlob throws on a tainted canvas — guard so one bad tile can't abort
       // the whole flush (crossOrigin loads should keep it untainted anyway).
       try {
         tile.canvas.toBlob((blob) => { if (blob) uploadPaintTile(bId, tile.key, blob); }, "image/png");
       } catch { /* */ }
     }
-  }, []);
+    if (evict.length) {
+      deletePaintTiles(bId, evict).catch(() => { /* best-effort */ });
+      for (const key of evict) evictTile(store, key);
+      bump();
+    }
+  }, [bump]);
   const scheduleFlush = useCallback(() => {
     if (flushTimer.current) clearTimeout(flushTimer.current);
     flushTimer.current = setTimeout(doFlush, FLUSH_DELAY_MS);
@@ -89,6 +100,11 @@ const PaintLayer = forwardRef(function PaintLayer({ boardId, enabled, zIndex = 5
     restore: (map) => {
       if (!map) return;
       for (const [key, url] of map) {
+        // This tile is being RESTORED (undo of a clear), not cleared — drop it
+        // from clearedKeys so a flush that lands before the async image redraw
+        // can't mistake it for an empty clear and delete+evict it (losing the
+        // undo). It re-uploads with real pixels once the image lands.
+        if (storeRef.current.clearedKeys) storeRef.current.clearedKeys.delete(key);
         const [tx, ty] = key.split("_").map(Number);
         const tile = ensureTile(storeRef.current, tx, ty);
         const ctx = tile.ctx;
@@ -118,13 +134,16 @@ const PaintLayer = forwardRef(function PaintLayer({ boardId, enabled, zIndex = 5
     // Wipe every tile (Clear-all drawings). Undo is handled by the caller via
     // snapshot()/restore() of allTileKeys().
     clearAll: () => {
-      for (const tile of storeRef.current.tiles.values()) {
+      const store = storeRef.current;
+      store.clearedKeys = store.clearedKeys || new Set();
+      for (const tile of store.tiles.values()) {
         const ctx = tile.ctx;
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.globalAlpha = 1;
         ctx.globalCompositeOperation = "source-over";
         ctx.clearRect(0, 0, TILE_PX, TILE_PX);
         tile.dirty = true;
+        store.clearedKeys.add(tile.key); // flush will evict any that stay empty
       }
       bump();
       scheduleFlush();
@@ -171,9 +190,12 @@ const PaintLayer = forwardRef(function PaintLayer({ boardId, enabled, zIndex = 5
       const poly = clip && clip.length >= 3 ? clip : null;
       const t0x = Math.floor(x / TILE_UNITS), t1x = Math.floor((x + w) / TILE_UNITS);
       const t0y = Math.floor(y / TILE_UNITS), t1y = Math.floor((y + h) / TILE_UNITS);
+      const store = storeRef.current;
+      store.clearedKeys = store.clearedKeys || new Set();
       for (let ty = t0y; ty <= t1y; ty++) for (let tx = t0x; tx <= t1x; tx++) {
-        const tile = storeRef.current.tiles.get(`${tx}_${ty}`);
+        const tile = store.tiles.get(`${tx}_${ty}`);
         if (!tile) continue;
+        store.clearedKeys.add(tile.key); // may have become empty → flush checks + evicts
         const ctx = tile.ctx;
         ctx.setTransform(PX_PER_UNIT, 0, 0, PX_PER_UNIT, -tx * TILE_UNITS * PX_PER_UNIT, -ty * TILE_UNITS * PX_PER_UNIT);
         if (poly) {
@@ -222,6 +244,14 @@ const PaintLayer = forwardRef(function PaintLayer({ boardId, enabled, zIndex = 5
 
   // Flush any pending save on unmount.
   useEffect(() => () => { if (flushTimer.current) { clearTimeout(flushTimer.current); doFlush(); } }, [doFlush]);
+
+  // Reap stroke sessions whose `end` never arrived (a dropped broadcast / a peer
+  // who left mid-stroke) so their per-tile scratch canvases can't leak for the
+  // whole board session. Cheap idle sweep; the baked pixels are already on-tile.
+  useEffect(() => {
+    const t = setInterval(() => reapStaleStrokes(storeRef.current), 5000);
+    return () => clearInterval(t);
+  }, []);
 
   // Load persisted tiles for this board on open. Skip a tile that's been
   // painted locally since (don't clobber fresh edits). crossOrigin keeps the

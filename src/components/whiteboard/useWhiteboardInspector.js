@@ -48,7 +48,9 @@ export function useWhiteboardInspector({ nodes, edges, setNodes }) {
   const arrange = useCallback(
     (op) => {
       setNodes((nds) => {
-        const sel = nds.filter((n) => n.selected && n.type !== "zone" && !n.parentId);
+        // Exclude locked nodes — align/distribute/match-size must not move or
+        // resize a node the user pinned (draggable:false + data.locked).
+        const sel = nds.filter((n) => n.selected && n.type !== "zone" && !n.parentId && !n.data?.locked && n.draggable !== false);
         if (sel.length < 2) return nds;
         const rs = sel.map((n) => ({
           id: n.id,
