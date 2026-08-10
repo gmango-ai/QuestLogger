@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { computeMicLive, shouldHearRoomAudio, ENTRY_FAILOPEN_MS, FOUNDER_SETTLE_MS } from "./audioGate";
 import {
-  pickMicSource, pickAudioSink, clusterRolesOf,
+  pickMicSource, pickAudioSink, clusterRolesOf, resolveDeviceRoles,
   ATTR_CLUSTER, ATTR_LEADER, ATTR_OVERRIDE, ATTR_ROOM_DEVICE, ATTR_SINK, ATTR_SINK_OFF,
 } from "./useRoomCluster";
 
@@ -177,5 +177,39 @@ describe("clusterRolesOf — per-identity role map", () => {
   });
   it("a participant with no cluster attribute has no role (renders as a normal tile)", () => {
     expect(clusterRolesOf([P("solo", {})]).has("solo")).toBe(false);
+  });
+});
+
+describe("resolveDeviceRoles — kiosk holds its roles across a reconnect (#12)", () => {
+  const bothTrue = { isMicSource: true, isAudioSink: true };
+  // A human took over the kiosk's mic; steady-state the kiosk is a follower.
+  const humanHoldsMic = [
+    P("kiosk", { [ATTR_CLUSTER]: "kiosk", [ATTR_LEADER]: "kiosk", [ATTR_ROOM_DEVICE]: "1" }),
+    P("human", { [ATTR_CLUSTER]: "kiosk", [ATTR_LEADER]: "human", [ATTR_OVERRIDE]: "manual" }),
+  ];
+
+  it("connected: recomputes — the kiosk yields the mic to the human who took it", () => {
+    const roles = resolveDeviceRoles({ myId: "kiosk", roomState: "connected", members: humanHoldsMic, lastRoles: bothTrue });
+    expect(roles.isMicSource).toBe(false);
+  });
+
+  it("BUG WOULD BE: while reconnecting the member list collapses to self → naive recompute grabs the mic", () => {
+    // The kiosk sees only itself mid-reconnect; pickMicSource(self-only) = self.
+    expect(pickMicSource([humanHoldsMic[0]])).toBe("kiosk");
+  });
+
+  it("FIX: while NOT connected, hold the last resolved roles (don't grab the mic)", () => {
+    const held = { isMicSource: false, isAudioSink: false }; // last steady state under the human
+    expect(resolveDeviceRoles({ myId: "kiosk", roomState: "reconnecting", members: [humanHoldsMic[0]], lastRoles: held })).toBe(held);
+    expect(resolveDeviceRoles({ myId: "kiosk", roomState: "connecting", members: [], lastRoles: held })).toBe(held);
+  });
+
+  it("FIX: connected but members not yet repopulated → also holds last roles", () => {
+    const held = { isMicSource: false, isAudioSink: false };
+    expect(resolveDeviceRoles({ myId: "kiosk", roomState: "connected", members: [], lastRoles: held })).toBe(held);
+  });
+
+  it("a fresh device with no roles yet assumes it is the mic + sink (seed)", () => {
+    expect(resolveDeviceRoles({ myId: null, roomState: "connecting", members: [], lastRoles: bothTrue })).toBe(bothTrue);
   });
 });

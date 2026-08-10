@@ -18,9 +18,53 @@ export const TILE_PX = TILE_UNITS * PX_PER_UNIT;
 const tileKey = (tx, ty) => `${tx}_${ty}`;
 
 // A store holds the live tiles + per-stroke sessions. onCreate fires when a new
-// tile is materialised so the React layer can mount its canvas.
+// tile is materialised so the React layer can mount its canvas. `clearedKeys` is
+// the set of tiles a clear op just wiped — flush checks only these for emptiness
+// (so normal painting never pays a scan) to evict + delete them.
 export function createPaintStore(onCreate) {
-  return { tiles: new Map(), strokes: new Map(), onCreate };
+  return { tiles: new Map(), strokes: new Map(), onCreate, clearedKeys: null };
+}
+
+// Drop a tile from the store and shrink its canvas so the (up to TILE_PX²)
+// backing store is released promptly rather than lingering until GC. Used to
+// reclaim memory after a tile has been fully cleared.
+export function evictTile(store, key) {
+  const tile = store.tiles.get(key);
+  if (!tile) return false;
+  if (tile.canvas) { tile.canvas.width = 0; tile.canvas.height = 0; }
+  store.tiles.delete(key);
+  return true;
+}
+
+// Whether a tile has any non-transparent pixel. Needs a real 2D canvas; returns
+// true (keep it) if it can't tell, so we never evict something we're unsure of.
+export function tileHasInk(tile) {
+  try {
+    const c = tile.canvas;
+    if (!c || !c.width || !c.height) return false;
+    const { data } = tile.ctx.getImageData(0, 0, c.width, c.height);
+    for (let i = 3; i < data.length; i += 4) if (data[i] !== 0) return true;
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+// Pure flush planner: split the DIRTY tiles into ones to UPLOAD vs ones to
+// DELETE+EVICT. A tile is only an evict candidate if a clear op marked it (it's
+// in `cleared`) AND it has no ink — so normal painting never pays an emptiness
+// scan, and an undo that re-drew a cleared tile is uploaded (not deleted),
+// keeping Storage race-free. Clears each processed tile's dirty flag. `hasInk`
+// is injected for testability. Returns { uploads:[tile], evict:[key] }.
+export function planTileFlush(tiles, cleared, hasInk) {
+  const uploads = [], evict = [];
+  for (const tile of tiles) {
+    if (!tile.dirty) continue;
+    tile.dirty = false;
+    if (cleared && cleared.has(tile.key) && !hasInk(tile)) evict.push(tile.key);
+    else uploads.push(tile);
+  }
+  return { uploads, evict };
 }
 
 // Drop a stroke session's per-tile scratch (two TILE_PX² canvases each) + sprite,

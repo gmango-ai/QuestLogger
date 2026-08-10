@@ -57,7 +57,7 @@ function DeviceMediaPicker({ kind, label, storageKey }) {
 }
 import { LIVEKIT_URL, fetchLiveKitToken, liveKitRoomName } from "../../lib/livekit";
 import { getLkRoomOptions, LK_CONNECT_OPTIONS, connectDelayFor, markConnectAttempt, connectCooldownMs, noteConnectFailure } from "./livekitConnect";
-import { ATTR_CLUSTER, ATTR_LEADER, ATTR_ROOM_DEVICE, ATTR_SINK_OFF, pickMicSource, pickAudioSink } from "./useRoomCluster";
+import { ATTR_CLUSTER, ATTR_LEADER, ATTR_ROOM_DEVICE, ATTR_SINK_OFF, resolveDeviceRoles } from "./useRoomCluster";
 import AdaptiveStage from "./AdaptiveStage";
 import { useFeaturedSpeaker } from "./useFeaturedSpeaker";
 import { useGlobalPin } from "./useGlobalPin";
@@ -145,21 +145,25 @@ function useDeviceRoles() {
   const room = useRoomContext();
   const participants = useParticipants();
   const [, bump] = useReducer((n) => (n + 1) % 1e9, 0);
+  // Fresh device: assume it's the room's mic + sink until told otherwise. Held
+  // across reconnects so a mid-reconnect participant-list flicker can't flip the
+  // kiosk back to mic source under a human who took it over (echo).
+  const lastRolesRef = useRef({ isMicSource: true, isAudioSink: true });
   useEffect(() => {
     if (!room) return undefined;
     room.on(RoomEvent.ParticipantAttributesChanged, bump);
+    room.on(RoomEvent.ConnectionStateChanged, bump); // re-evaluate on (re)connect transitions
     return () => {
       room.off(RoomEvent.ParticipantAttributesChanged, bump);
+      room.off(RoomEvent.ConnectionStateChanged, bump);
     };
   }, [room]);
   const myId = room?.localParticipant?.identity;
-  // Assume both until we know otherwise (avoids cutting out on connect).
-  if (!myId) return { isMicSource: true, isAudioSink: true };
   // The device's cluster id is its own identity (set by the beacon).
   const members = participants.filter((p) => p.attributes?.[ATTR_CLUSTER] === myId);
-  if (!members.length) return { isMicSource: true, isAudioSink: true };
-  const micId = pickMicSource(members);
-  return { isMicSource: micId === myId, isAudioSink: pickAudioSink(members, micId) === myId };
+  const roles = resolveDeviceRoles({ myId, roomState: room?.state, members, lastRoles: lastRolesRef.current });
+  lastRolesRef.current = roles;
+  return roles;
 }
 
 // TV conferencing stage. Small calls use an even grid; once there are 3+

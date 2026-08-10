@@ -45,3 +45,13 @@ export async function uploadPaintTile(boardId, key, blob) {
     .upload(path, blob, { cacheControl: "60", upsert: true, contentType: "image/png" });
   return { error };
 }
+
+// Delete now-empty tiles' PNGs (after a Clear-all / region erase) so blank tiles
+// don't linger in Storage and re-materialise on the next open. Best-effort +
+// idempotent; uses the "wb-images: paint deletes" RLS policy.
+export async function deletePaintTiles(boardId, keys) {
+  if (!boardId || !keys || !keys.length) return { error: null };
+  const paths = keys.map((k) => `${prefix(boardId)}/${k}.png`);
+  const { error } = await supabase.storage.from(BUCKET).remove(paths);
+  return { error };
+}

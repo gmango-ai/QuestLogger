@@ -1,7 +1,7 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { ViewportPortal } from "@xyflow/react";
-import { createPaintStore, applyPaintChunk, ensureTile, reapStaleStrokes, TILE_UNITS, TILE_PX, PX_PER_UNIT } from "./paintTiles";
-import { listPaintTiles, uploadPaintTile } from "../../lib/whiteboardPaint";
+import { createPaintStore, applyPaintChunk, ensureTile, reapStaleStrokes, evictTile, tileHasInk, planTileFlush, TILE_UNITS, TILE_PX, PX_PER_UNIT } from "./paintTiles";
+import { listPaintTiles, uploadPaintTile, deletePaintTiles } from "../../lib/whiteboardPaint";
 
 const FLUSH_DELAY_MS = 2000; // idle time before dirty tiles are saved to Storage
 
@@ -42,21 +42,32 @@ const PaintLayer = forwardRef(function PaintLayer({ boardId, enabled, zIndex = 5
   const flushTimer = useRef(0);
 
   // Save every dirty tile as a PNG (debounced). Idempotent upsert — last write
-  // wins, and since every client renders identical pixels they converge.
+  // wins, and since every client renders identical pixels they converge. Tiles a
+  // clear op wiped (store.clearedKeys) that are now empty are instead DELETED from
+  // Storage + evicted from memory, so blank tiles don't accumulate for the whole
+  // session or re-materialise on reload. The emptiness check runs only for those
+  // cleared tiles, so normal painting never pays a scan; and it's content-based
+  // at flush time, so an undo that re-drew a cleared tile is uploaded, not deleted.
   const doFlush = useCallback(() => {
     flushTimer.current = 0;
     const bId = boardRef.current;
     if (!bId) return;
-    for (const tile of storeRef.current.tiles.values()) {
-      if (!tile.dirty) continue;
-      tile.dirty = false;
+    const store = storeRef.current;
+    const { uploads, evict } = planTileFlush(store.tiles.values(), store.clearedKeys, tileHasInk);
+    store.clearedKeys = null;
+    for (const tile of uploads) {
       // toBlob throws on a tainted canvas — guard so one bad tile can't abort
       // the whole flush (crossOrigin loads should keep it untainted anyway).
       try {
         tile.canvas.toBlob((blob) => { if (blob) uploadPaintTile(bId, tile.key, blob); }, "image/png");
       } catch { /* */ }
     }
-  }, []);
+    if (evict.length) {
+      deletePaintTiles(bId, evict).catch(() => { /* best-effort */ });
+      for (const key of evict) evictTile(store, key);
+      bump();
+    }
+  }, [bump]);
   const scheduleFlush = useCallback(() => {
     if (flushTimer.current) clearTimeout(flushTimer.current);
     flushTimer.current = setTimeout(doFlush, FLUSH_DELAY_MS);
@@ -118,13 +129,16 @@ const PaintLayer = forwardRef(function PaintLayer({ boardId, enabled, zIndex = 5
     // Wipe every tile (Clear-all drawings). Undo is handled by the caller via
     // snapshot()/restore() of allTileKeys().
     clearAll: () => {
-      for (const tile of storeRef.current.tiles.values()) {
+      const store = storeRef.current;
+      store.clearedKeys = store.clearedKeys || new Set();
+      for (const tile of store.tiles.values()) {
         const ctx = tile.ctx;
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.globalAlpha = 1;
         ctx.globalCompositeOperation = "source-over";
         ctx.clearRect(0, 0, TILE_PX, TILE_PX);
         tile.dirty = true;
+        store.clearedKeys.add(tile.key); // flush will evict any that stay empty
       }
       bump();
       scheduleFlush();
@@ -171,9 +185,12 @@ const PaintLayer = forwardRef(function PaintLayer({ boardId, enabled, zIndex = 5
       const poly = clip && clip.length >= 3 ? clip : null;
       const t0x = Math.floor(x / TILE_UNITS), t1x = Math.floor((x + w) / TILE_UNITS);
       const t0y = Math.floor(y / TILE_UNITS), t1y = Math.floor((y + h) / TILE_UNITS);
+      const store = storeRef.current;
+      store.clearedKeys = store.clearedKeys || new Set();
       for (let ty = t0y; ty <= t1y; ty++) for (let tx = t0x; tx <= t1x; tx++) {
-        const tile = storeRef.current.tiles.get(`${tx}_${ty}`);
+        const tile = store.tiles.get(`${tx}_${ty}`);
         if (!tile) continue;
+        store.clearedKeys.add(tile.key); // may have become empty → flush checks + evicts
         const ctx = tile.ctx;
         ctx.setTransform(PX_PER_UNIT, 0, 0, PX_PER_UNIT, -tx * TILE_UNITS * PX_PER_UNIT, -ty * TILE_UNITS * PX_PER_UNIT);
         if (poly) {

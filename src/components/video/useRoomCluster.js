@@ -100,6 +100,18 @@ export function pickAudioSink(members, micSourceId) {
   return eligible[0] || micSourceId || null;
 }
 
+// A device/kiosk's own {isMicSource, isAudioSink}, held stable across reconnects.
+// During a (re)connect the participant list transiently collapses to self, which
+// would flip the kiosk back to mic source under a co-located human who holds it
+// (echo). So only recompute while the room is steadily CONNECTED with real
+// members; otherwise keep the last resolved roles. A fresh device seeds lastRoles
+// = both-true (assume it's the room's mic+sink until told otherwise). Pure.
+export function resolveDeviceRoles({ myId, roomState, members, lastRoles }) {
+  if (!myId || roomState !== "connected" || !members || !members.length) return lastRoles;
+  const micId = pickMicSource(members);
+  return { isMicSource: micId === myId, isAudioSink: pickAudioSink(members, micId) === myId };
+}
+
 // identity -> { inRoom, isMicSource, isAudioSink, isDevice } for ALL clusters in
 // the call. Used to badge every tile regardless of which cluster it's in. Pure.
 export function clusterRolesOf(participants) {
