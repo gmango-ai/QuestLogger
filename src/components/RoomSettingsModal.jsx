@@ -9,6 +9,7 @@ import {
   setRoomPinPolicy, setRoomKnockEnabled, setRoomWhiteboardLock, setRoomKind,
 } from "../lib/rooms";
 import { clearRoomChat } from "../lib/chatMessages";
+import RoomGuestInvite from "./office/RoomGuestInvite";
 
 const DURATION_PRESETS = [
   { value: 15, label: "15m" },
@@ -37,6 +38,16 @@ const KIND_OPTIONS = [
     hint: "Locks behind a shareable code once someone's inside." },
 ];
 
+// Tabs group the (many) room controls so the modal isn't one long scroll:
+//   General       — identity + placement (name, type, color, duration, visibility)
+//   Access        — who gets in (entry policy, PIN, knock) + external guest links
+//   Collaboration — in-room controls (pin authority, whiteboard lock)
+const TABS = [
+  { key: "general", label: "General" },
+  { key: "access", label: "Access" },
+  { key: "collaboration", label: "Collaboration" },
+];
+
 // Combined edit modal for a room. Replaces the inline rename + the
 // separate RoomGatingModal — admins/leads change everything from one
 // screen. Each section saves independently so a partial failure doesn't
@@ -60,6 +71,7 @@ export default function RoomSettingsModal({
   const [pinPolicy, setPinPolicy] = useState("admins");    // who can pin for everyone
   const [knockEnabled, setKnockEnabled] = useState(true);  // accept knocks while occupied
   const [whiteboardLocked, setWhiteboardLocked] = useState(false); // lock board to managers
+  const [tab, setTab] = useState("general");
   const [busy, setBusy] = useState(false);
   const [dirty, setDirty] = useState({ name: false, kind: false, color: false, gating: false, duration: false, access: false, pin: false, whiteboard: false });
   // Two-step delete: clicking the trash icon flips this to true and the
@@ -89,6 +101,7 @@ export default function RoomSettingsModal({
     setAccessCode("");
     setCurrentCode("");
     setDirty({ name: false, color: false, gating: false, duration: false, access: false, pin: false, whiteboard: false });
+    setTab("general");
     setConfirmDelete(false);
     setConfirmClear(false);
     setBusy(false);
@@ -257,9 +270,38 @@ export default function RoomSettingsModal({
           Room settings
         </h2>
 
-        {/* Scrollable body — everything between the pinned header and footer. */}
-        <div className="flex-1 min-h-0 overflow-y-auto px-5 sm:px-6">
+        {/* Tabs — group the controls so the modal isn't one long scroll. A dot
+            marks a tab with unsaved changes (Save persists every tab at once). */}
+        <div className={`flex gap-5 px-5 sm:px-6 shrink-0 border-b ${dark ? "border-[var(--color-border)]" : "border-slate-200"}`}>
+          {TABS.map((t) => {
+            const active = tab === t.key;
+            const changed =
+              (t.key === "general" && (dirty.name || dirty.kind || dirty.color || dirty.duration || dirty.gating))
+              || (t.key === "access" && dirty.access)
+              || (t.key === "collaboration" && (dirty.pin || dirty.whiteboard));
+            return (
+              <button
+                key={t.key}
+                type="button"
+                onClick={() => setTab(t.key)}
+                aria-pressed={active}
+                className={`inline-flex items-center gap-1.5 py-2.5 -mb-px border-b-2 text-[13px] font-semibold transition-colors ${
+                  active
+                    ? "border-[var(--color-accent)] text-[var(--color-accent)]"
+                    : (dark ? "border-transparent text-slate-400 hover:text-slate-200" : "border-transparent text-slate-500 hover:text-slate-700")
+                }`}
+              >
+                {t.label}
+                {changed && <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)]" title="Unsaved changes" />}
+              </button>
+            );
+          })}
+        </div>
 
+        {/* Scrollable body — everything between the pinned tabs and footer. */}
+        <div className="flex-1 min-h-0 overflow-y-auto px-5 sm:px-6 pt-4">
+
+        {tab === "general" && (<>
         {/* Name */}
         <div className="mb-4">
           <label className={labelCls}>Name</label>
@@ -451,6 +493,9 @@ export default function RoomSettingsModal({
           </div>
         )}
 
+        </>)}
+
+        {tab === "access" && (<>
         {/* Access — who can enter the room. 'Open' = any teammate who can
             see it; 'Code' = a shareable access code is required (managers
             always get in without one). */}
@@ -524,6 +569,12 @@ export default function RoomSettingsModal({
           )}
         </div>
 
+        {/* External guests — tokenized share links that let outsiders join this
+            room's call + whiteboard (self-contained; saves immediately). */}
+        <RoomGuestInvite room={room} dark={dark} onError={onError} />
+        </>)}
+
+        {tab === "collaboration" && (<>
         {/* Pin control — who can pin a participant into everyone's view during a
             call (sets the shared focus all clients follow). */}
         <div className="mb-4">
@@ -588,6 +639,8 @@ export default function RoomSettingsModal({
             </span>
           </label>
         </div>
+
+        </>)}
 
         </div>{/* /scrollable body */}
 

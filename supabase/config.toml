@@ -164,7 +164,12 @@ refresh_token_reuse_interval = 10
 # Allow/disallow new user signups to your project.
 enable_signup = true
 # Allow/disallow anonymous sign-ins to your project.
-enable_anonymous_sign_ins = false
+# Required for external room guests: /office/guest/:token signs the visitor in
+# anonymously (signInAsGuest) before redeeming their room_guests grant. Guests
+# are blocked from teams (join_team_by_code) and can only mint a LiveKit token
+# for a room they hold a grant for, so the blast radius is limited; the
+# anonymous_users rate limit below (30/hr/IP) caps abuse.
+enable_anonymous_sign_ins = true
 # Allow/disallow testing manual linking of accounts
 enable_manual_linking = false
 # Passwords shorter than this value will be rejected as weak. Minimum 6, recommended 8 or more.

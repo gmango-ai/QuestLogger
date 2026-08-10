@@ -9,6 +9,7 @@ import { getProfiles } from "../../lib/profiles";
 import { fetchMeetingsInRange } from "../../lib/calendar";
 import { computeAvailability, firstDayWithSlot, addDays } from "../../lib/findATime";
 import { createScheduledMeeting } from "../../lib/scheduledMeetings";
+import { ensureGuestJoinLink, buildMeetingCalendarFields } from "../../lib/rooms";
 import { browserTimezone, tzAbbrev } from "../../lib/timezone";
 
 // "Find a time" — see attendees' availability and get suggested open slots.
@@ -153,9 +154,21 @@ export default function FindATimeModal({ teamId, rooms, dark, onClose, onSchedul
     setCreating(true); setError("");
     const start = new Date(slot.start), end = new Date(slot.end);
     const emails = parseEmails(externalEmails);
+
+    // External-guest join link (fails soft if the scheduler can't manage the room).
+    let guestLinkId = null, guestJoinUrl = null;
+    if (emails.length > 0 && generalRoom?.id) {
+      const link = await ensureGuestJoinLink(generalRoom.id, { label: title.trim() });
+      guestLinkId = link.id; guestJoinUrl = link.url;
+    }
+    const cal = buildMeetingCalendarFields({ roomName: generalRoom.name, joinUrl: guestJoinUrl });
+
     let googleEventId = null, googleHtmlLink = null;
     if (addGoogle && hasGoogle) {
-      const ev = await createCalendarEvent({ summary: title.trim(), start, end, attendees: emails, location: generalRoom.name });
+      const ev = await createCalendarEvent({
+        summary: title.trim(), start, end, attendees: emails,
+        description: cal.description, location: cal.location,
+      });
       if (!ev) { setCreating(false); return; } // token re-consent redirect underway
       googleEventId = ev.id; googleHtmlLink = ev.htmlLink;
     }
@@ -166,6 +179,7 @@ export default function FindATimeModal({ teamId, rooms, dark, onClose, onSchedul
       auto_record: false, priority: 1,
       attendee_ids: [...attendeeIds], attendee_emails: emails,
       google_event_id: googleEventId, google_html_link: googleHtmlLink,
+      guest_link_id: guestLinkId, guest_join_url: guestJoinUrl,
     });
     setCreating(false);
     if (saveErr) { setError(saveErr.message || "Could not schedule the meeting."); return; }

@@ -53,7 +53,10 @@ function mergeSessionMetadata(prev, row) {
   return merged;
 }
 
-const SyncSessionContext = createContext(null);
+// Exported so a stripped-down surface (e.g. the external-guest room page, which
+// renders the call + whiteboard outside AuthenticatedApp) can supply a stub
+// value — LiveKitCall's ConferenceLayout calls useSyncSession() unconditionally.
+export const SyncSessionContext = createContext(null);
 
 export function SyncSessionProvider({ session, children }) {
   const { settings } = useApp();
