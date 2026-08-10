@@ -63,6 +63,15 @@ export default function GuestRoomPage() {
   const [phase, setPhase] = useState("form"); // form | waiting | in | left
   const [view, setView] = useState("call"); // call | board
 
+  // phaseRef mirrors `phase` SYNCHRONOUSLY (every transition goes through goPhase)
+  // so the call handlers can read it inside async LiveKit events — including the
+  // CLIENT_INITIATED onLeft a React unmount fires — without racing setPhase.
+  const phaseRef = useRef(phase);
+  const goPhase = useCallback((next) => { phaseRef.current = next; setPhase(next); }, []);
+  // True between VideoCall's onJoined and the next disconnect. Lets handleCallError
+  // tell a pre-connect failure (recover) from a mid-call blip (ignore).
+  const connectedRef = useRef(false);
+
   const whiteboardId = sessionRow?.whiteboard_id || null;
 
   // Watch auth so a returning guest (refresh) keeps its anon session, and so the
@@ -86,7 +95,7 @@ export default function GuestRoomPage() {
     if (!rid) return false;
     const { data: active } = await fetchRoomActiveSession(rid);
     if (!active?.join_code) {
-      setPhase("waiting");
+      goPhase("waiting");
       return false;
     }
     const { data, error: joinErr } = await joinSyncSession(active.join_code, displayName);
@@ -95,13 +104,13 @@ export default function GuestRoomPage() {
       setError(joinErr.message === "room_entry_denied"
         ? "Your invite is no longer valid."
         : (joinErr.message || "Could not join the room."));
-      setPhase("waiting");
+      goPhase("waiting");
       return false;
     }
     setSessionRow(data?.session || active);
-    setPhase("in");
+    goPhase("in");
     return true;
-  }, []);
+  }, [goPhase]);
 
   // The main "Join" action from the name form.
   async function enter() {
@@ -151,7 +160,7 @@ export default function GuestRoomPage() {
       heartbeatSyncSession(sessionRow.id);
       const { data: active } = await fetchRoomActiveSession(room.room_id);
       if (cancelled) return;
-      if (!active) { setPhase("waiting"); return; }
+      if (!active) { goPhase("waiting"); return; }
       // If the host restarted (new session id), re-join it. If the rejoin FAILS
       // (revoked grant, full room, transient error), drop back to the waiting
       // room instead of pointing the shell at a session we're not a participant
@@ -159,7 +168,7 @@ export default function GuestRoomPage() {
       if (active.id !== sessionRow.id && active.join_code) {
         const { error: rejoinErr } = await joinSyncSession(active.join_code, name.trim());
         if (cancelled) return;
-        if (rejoinErr) { setPhase("waiting"); return; }
+        if (rejoinErr) { goPhase("waiting"); return; }
       }
       setSessionRow((prev) => (prev && prev.whiteboard_id === active.whiteboard_id && prev.id === active.id ? prev : active));
     };
@@ -173,41 +182,36 @@ export default function GuestRoomPage() {
     if (view === "board" && !whiteboardId) setView("call");
   }, [view, whiteboardId]);
 
-  // Whether the call is currently connected (set on VideoCall's onJoined, cleared
-  // whenever we disconnect or leave). VideoCall fires onLeft on EVERY LiveKit
-  // disconnect — INCLUDING the CLIENT_INITIATED event a React unmount triggers
-  // (room.disconnect on teardown). Gating every call handler on this ref keeps a
-  // self-induced teardown (leaving, or dropping to the waiting room) from being
-  // reprocessed as a fresh drop. Mirrors PersistentVideoCall's connectedRef.
-  const connectedRef = useRef(false);
-
   const handleLeave = useCallback(async () => {
     connectedRef.current = false;
     if (sessionRow?.id) { try { await leaveSyncSession(sessionRow.id); } catch { /* best-effort */ } }
-    setPhase("left");
-  }, [sessionRow?.id]);
+    goPhase("left");
+  }, [sessionRow?.id, goPhase]);
 
-  // A genuine drop while connected. Only a TERMINAL reason (in-call Leave, kick,
-  // room closed, signed in elsewhere) ends the guest session; a transient network
-  // drop sends them to the waiting room, whose 4s poll re-joins the live session
-  // automatically (self-healing) — never the terminal "You left" screen. Ignore
-  // the stale onLeft from our own unmount (connectedRef already false).
+  // VideoCall fires onLeft on EVERY LiveKit disconnect — INCLUDING the
+  // CLIENT_INITIATED event a React unmount triggers (room.disconnect on teardown).
+  // Discriminate by PHASE, not connection: a drop is genuine only while we still
+  // intend to be in the call (phase "in"); once we've moved to waiting/left it's
+  // our own teardown, so ignore it. A TERMINAL reason (in-call Leave, kick, room
+  // closed, signed in elsewhere) ends the guest session; anything else — a
+  // transient drop OR a pre-connect failure like join_failure — goes to the
+  // waiting room, whose 4s poll re-joins automatically (self-healing).
   const handleCallLeft = useCallback((reason) => {
-    if (!connectedRef.current) return;
+    if (phaseRef.current !== "in") return;
     connectedRef.current = false;
     if (isTerminalDisconnect(reason)) { handleLeave(); return; }
-    setPhase("waiting");
-  }, [handleLeave]);
+    goPhase("waiting");
+  }, [handleLeave, goPhase]);
 
-  // VideoCall SWALLOWS a recoverable connect/token failure (forwarded via onError,
-  // no card, host expected to re-drive). If a connect fails BEFORE we're connected
-  // it would otherwise strand the guest on a blank "connecting" state — fall back
-  // to the waiting room's self-healing poll. A recoverable error AFTER onJoined is
-  // a transient mid-call blip LiveKit recovers itself — ignore it so an active
-  // guest isn't ejected. A PERMANENT error is left to VideoCall's own card + Leave.
+  // VideoCall SWALLOWS a recoverable connect/token error (forwarded via onError,
+  // no card, host expected to re-drive). Before we're connected, a failed connect
+  // would strand the guest on a blank "connecting" state — fall back to the
+  // waiting room's self-healing poll. After onJoined, a recoverable error is a
+  // transient mid-call blip LiveKit recovers itself — ignore it so an active guest
+  // isn't ejected. A PERMANENT error is left to VideoCall's own card + header Leave.
   const handleCallError = useCallback((_message, recoverable) => {
-    if (recoverable && !connectedRef.current) setPhase("waiting");
-  }, []);
+    if (recoverable && !connectedRef.current) goPhase("waiting");
+  }, [goPhase]);
 
   // ── Render: terminal / lobby states use the shared centered JoinShell ──
   if (session === undefined) return <JoinShell loading />;
@@ -233,7 +237,7 @@ export default function GuestRoomPage() {
           Thanks for joining{room?.room_name ? ` ${room.room_name}` : ""}.
         </p>
         <div className="space-y-2">
-          <Button onClick={() => setPhase("waiting")} variant="outline" className="w-full">Rejoin</Button>
+          <Button onClick={() => goPhase("waiting")} variant="outline" className="w-full">Rejoin</Button>
           <Link to="/login" className="block text-center text-sm underline text-[var(--color-accent)]">Sign in for full access</Link>
         </div>
       </JoinShell>
