@@ -10,27 +10,15 @@ import { cloneDocStyles, copyRootCustomProps } from "../pomodoro/PomodoroPipPart
 import { audioMediaSnapshot, logAudioEvent, logCallEvent } from "./livekitDiagnostics";
 import { getAudioContext } from "../../lib/audioContext";
 import { createSyncSession } from "../../lib/syncSession";
+import { endReasonForDisconnect } from "./disconnectReason";
 import VideoCall from "./VideoCall";
 
-// LiveKit disconnect reasons (human names from LiveKitCall's onDisconnected)
-// that are TERMINAL — the call must NOT auto-rejoin after them. A plain network
-// / transient drop maps to "livekit-disconnected", which keeps the auto-rejoin
-// marker so VideoCallContext's watcher can reconnect. These clear it.
-const LK_TERMINAL_DISCONNECTS = new Set([
-  "client_initiated",    // user hit Leave in the call control bar
-  "duplicate_identity",  // signed in elsewhere — that session wins, don't fight it
-  "participant_removed", // moderation kick
-  "room_deleted",
-  "room_closed",
-  "user_rejected",
-]);
-// Map a LiveKit disconnect reason to the endCall reason. Terminal reasons get a
-// distinct tag (≠ "livekit-disconnected") so endCall clears the rejoin marker;
-// everything else stays "livekit-disconnected" (recoverable → eligible to
-// auto-rejoin, and the string that also fires on a logout unmount).
-export function endReasonForDisconnect(reason) {
-  return LK_TERMINAL_DISCONNECTS.has(reason) ? `livekit-${reason}` : "livekit-disconnected";
-}
+// Re-exported from ./disconnectReason (shared with GuestRoomPage) so the existing
+// `import { endReasonForDisconnect } from "./PersistentVideoCall"` call sites and
+// reconnect.test.js keep working. Terminal reasons get a distinct tag (≠
+// "livekit-disconnected") so endCall clears the rejoin marker; everything else
+// stays "livekit-disconnected" (recoverable → eligible to auto-rejoin).
+export { endReasonForDisconnect };
 
 // Re-parenting the call host — between the page stage, the floating PiP, and the
 // Document-PiP window — pauses its media elements. Crucially that includes the

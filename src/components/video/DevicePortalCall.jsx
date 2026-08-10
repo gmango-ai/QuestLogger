@@ -584,6 +584,10 @@ export default function DevicePortalCall({ roomId, displayName, active = true })
   const [nonce, bumpNonce] = useReducer((n) => (n + 1) & 0xffff, 0);
   const retryRef = useRef(0);
   const retryTimerRef = useRef(null);
+  // Latest `active`, read inside onDisconnected: a teardown when `active` flips
+  // off (LiveKitRoom unmounts) must never be treated as an involuntary drop.
+  const activeRef = useRef(active);
+  activeRef.current = active;
 
   useEffect(() => {
     // Only mint a token + connect while `active` (someone's in the call). When
@@ -650,11 +654,16 @@ export default function DevicePortalCall({ roomId, displayName, active = true })
         style={{ height: "100%" }}
         onError={() => { noteConnectFailure(); }}
         onDisconnected={(reason) => {
-          // A non-user disconnect (reason !== ClientInitiated=1) that LiveKit's
-          // own reconnect couldn't recover → drop the token and re-mint so the
-          // kiosk rejoins itself instead of freezing on a dead room. (A teardown
-          // when `active` flips off is client-initiated → left alone.)
-          if (reason !== undefined && reason !== 1) { setToken(null); bumpNonce(); }
+          // Re-mint on ANY involuntary drop LiveKit's own reconnect couldn't
+          // recover — INCLUDING one it reports with no reason (undefined), which
+          // is a plain transient drop (see endReasonForDisconnect), not a signal
+          // to freeze on a dead room. Skip only: a teardown while `active` is off
+          // (LiveKitRoom unmounting), and a client-initiated disconnect
+          // (reason === 1 — our own nonce-driven remount, which would otherwise
+          // loop). The kiosk has no human to recover it, so it reconnects itself.
+          if (!activeRef.current) return;
+          if (reason === 1) return; // DisconnectReason.CLIENT_INITIATED — intentional
+          setToken(null); bumpNonce();
         }}
       >
         <DevicePortalInner />

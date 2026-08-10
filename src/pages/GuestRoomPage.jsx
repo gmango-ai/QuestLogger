@@ -7,6 +7,7 @@ import { TeamContext } from "../context/TeamContext";
 import { SyncSessionContext } from "../context/SyncSessionContext";
 import { VideoCallProvider } from "../context/VideoCallContext";
 import VideoCall from "../components/video/VideoCall";
+import { isTerminalDisconnect } from "../components/video/disconnectReason";
 import { WhiteboardBoard } from "./WhiteboardPage";
 import JoinShell, { JoinNotice } from "../components/JoinShell";
 import { signInAsGuest } from "../lib/auth";
@@ -61,6 +62,7 @@ export default function GuestRoomPage() {
   const [sessionRow, setSessionRow] = useState(null); // active sync_session once joined
   const [phase, setPhase] = useState("form"); // form | waiting | in | left
   const [view, setView] = useState("call"); // call | board
+  const [callNonce, setCallNonce] = useState(0); // bump to remount the call on a recoverable drop
 
   const whiteboardId = sessionRow?.whiteboard_id || null;
 
@@ -176,6 +178,18 @@ export default function GuestRoomPage() {
     if (sessionRow?.id) { try { await leaveSyncSession(sessionRow.id); } catch { /* best-effort */ } }
     setPhase("left");
   }, [sessionRow?.id]);
+
+  // VideoCall fires onLeft on EVERY LiveKit disconnect, not just an intentional
+  // leave. Only a TERMINAL reason (the guest hit Leave in-call, was removed, the
+  // room closed, or they signed in elsewhere) ends the guest session. A transient
+  // network drop must NOT eject them to the "You left" screen — remount the call
+  // (bump its key) so it rejoins, mirroring the member auto-rejoin path. Their
+  // sync-session participant row is untouched, and the heartbeat tick still handles
+  // a host-restarted (rejoin by new code) or host-ended (→ waiting) session.
+  const handleCallLeft = useCallback((reason) => {
+    if (isTerminalDisconnect(reason)) { handleLeave(); return; }
+    setCallNonce((n) => n + 1);
+  }, [handleLeave]);
 
   // ── Render: terminal / lobby states use the shared centered JoinShell ──
   if (session === undefined) return <JoinShell loading />;
@@ -301,12 +315,13 @@ export default function GuestRoomPage() {
                     connected when switching views. */}
                 <div className={view === "call" ? "absolute inset-0" : "hidden"}>
                   <VideoCall
+                    key={callNonce}
                     roomId={room.room_id}
                     displayName={name}
                     publish
                     listen
                     choices={{ videoEnabled: false, audioEnabled: false }}
-                    onLeft={handleLeave}
+                    onLeft={handleCallLeft}
                   />
                 </div>
                 {whiteboardId && (
