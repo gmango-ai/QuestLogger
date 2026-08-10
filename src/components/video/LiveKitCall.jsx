@@ -2909,11 +2909,16 @@ export default function LiveKitCall({ roomId, displayName, compact, publish = tr
   // was ignored and the user joined with a HOT mic. Re-seed from the new choices
   // on the publish false→true edge ONLY, so fresh green-room joins (correct at
   // mount) and in-call user mute toggles (publish already true) are untouched.
+  //
+  // Done DURING RENDER (not in an effect): React re-renders with the corrected
+  // micMuted before committing, so PublishController's mic-gate child effect runs
+  // this same commit with the muted value — an effect would leave a one-commit
+  // window where the mic gate saw the stale (open) value first: a hot-mic flash.
   const prevPublishRef = useRef(publish);
-  useEffect(() => {
-    if (publish && !prevPublishRef.current) setMicMuted(choices?.audioEnabled === false);
+  if (prevPublishRef.current !== publish) {
     prevPublishRef.current = publish;
-  }, [publish, choices?.audioEnabled]);
+    if (publish) setMicMuted(choices?.audioEnabled === false);
+  }
 
   useEffect(() => {
     let cancelled = false;

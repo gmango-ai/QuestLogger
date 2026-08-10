@@ -141,27 +141,47 @@ function DeviceClusterBeacon() {
 // The device's current room roles. Either goes false once someone in the room
 // takes over that role: the device then pauses its mic / speakers so two mics
 // or two speakers in one space don't conflict.
+const DEVICE_ROLE_SETTLE_MS = 1500;
+
 function useDeviceRoles() {
   const room = useRoomContext();
   const participants = useParticipants();
   const [, bump] = useReducer((n) => (n + 1) % 1e9, 0);
   // Fresh device: assume it's the room's mic + sink until told otherwise. Held
-  // across reconnects so a mid-reconnect participant-list flicker can't flip the
-  // kiosk back to mic source under a human who took it over (echo).
+  // across reconnects so a mid-reconnect participant-list flicker (collapse to
+  // nothing, or to just the kiosk) can't flip it back to mic source under a
+  // human who took it over (echo).
   const lastRolesRef = useRef({ isMicSource: true, isAudioSink: true });
+  // When the room last became connected — starts the self-only settle window.
+  const [connectedAt, setConnectedAt] = useState(null);
   useEffect(() => {
     if (!room) return undefined;
+    const onState = () => {
+      setConnectedAt((prev) => (room.state === "connected" ? (prev ?? Date.now()) : null));
+      bump();
+    };
     room.on(RoomEvent.ParticipantAttributesChanged, bump);
-    room.on(RoomEvent.ConnectionStateChanged, bump); // re-evaluate on (re)connect transitions
+    room.on(RoomEvent.ConnectionStateChanged, onState);
+    onState(); // initialise from the current state
     return () => {
       room.off(RoomEvent.ParticipantAttributesChanged, bump);
-      room.off(RoomEvent.ConnectionStateChanged, bump);
+      room.off(RoomEvent.ConnectionStateChanged, onState);
     };
   }, [room]);
+  // Re-evaluate once the settle window elapses, so a genuine "everyone left"
+  // (still self-only after the settle) lets the kiosk reclaim the mic.
+  useEffect(() => {
+    if (connectedAt == null) return undefined;
+    const t = setTimeout(bump, DEVICE_ROLE_SETTLE_MS + 100);
+    return () => clearTimeout(t);
+  }, [connectedAt]);
   const myId = room?.localParticipant?.identity;
   // The device's cluster id is its own identity (set by the beacon).
   const members = participants.filter((p) => p.attributes?.[ATTR_CLUSTER] === myId);
-  const roles = resolveDeviceRoles({ myId, roomState: room?.state, members, lastRoles: lastRolesRef.current });
+  const roles = resolveDeviceRoles({
+    myId, roomState: room?.state, members, lastRoles: lastRolesRef.current,
+    connectedSince: connectedAt, now: Date.now(), settleMs: DEVICE_ROLE_SETTLE_MS,
+  });
   lastRolesRef.current = roles;
   return roles;
 }

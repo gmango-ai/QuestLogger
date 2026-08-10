@@ -101,13 +101,21 @@ export function pickAudioSink(members, micSourceId) {
 }
 
 // A device/kiosk's own {isMicSource, isAudioSink}, held stable across reconnects.
-// During a (re)connect the participant list transiently collapses to self, which
-// would flip the kiosk back to mic source under a co-located human who holds it
-// (echo). So only recompute while the room is steadily CONNECTED with real
-// members; otherwise keep the last resolved roles. A fresh device seeds lastRoles
-// = both-true (assume it's the room's mic+sink until told otherwise). Pure.
-export function resolveDeviceRoles({ myId, roomState, members, lastRoles }) {
+// During a (re)connect the participant list transiently collapses — to nothing,
+// or to just the kiosk itself (its own cluster attribute survives) — which would
+// flip the kiosk back to mic source under a co-located human who holds it (echo).
+// So:
+//   • not connected, or no members yet → keep the last resolved roles;
+//   • connected but only the kiosk is present, WITHIN `settleMs` of the last
+//     (re)connect → also keep last roles: a co-located human's attributes have
+//     probably just not resynced yet. After the settle a still-self-only set is
+//     treated as genuine ("everyone left"), so the kiosk reclaims the mic rather
+//     than leaving the room without one.
+// A fresh device seeds lastRoles = both-true (assume it's the mic+sink). Pure.
+export function resolveDeviceRoles({ myId, roomState, members, lastRoles, connectedSince = null, now = null, settleMs = 1500 }) {
   if (!myId || roomState !== "connected" || !members || !members.length) return lastRoles;
+  const selfOnly = members.length === 1 && members[0]?.identity === myId;
+  if (selfOnly && connectedSince != null && now != null && now - connectedSince < settleMs) return lastRoles;
   const micId = pickMicSource(members);
   return { isMicSource: micId === myId, isAudioSink: pickAudioSink(members, micId) === myId };
 }

@@ -209,6 +209,20 @@ describe("resolveDeviceRoles — kiosk holds its roles across a reconnect (#12)"
     expect(resolveDeviceRoles({ myId: "kiosk", roomState: "connected", members: [], lastRoles: held })).toBe(held);
   });
 
+  it("FIX: connected + self-only WITHIN the settle → holds last roles (flicker — don't grab under the human)", () => {
+    const held = { isMicSource: false, isAudioSink: false };
+    const selfOnly = [P("kiosk", { [ATTR_CLUSTER]: "kiosk", [ATTR_LEADER]: "kiosk", [ATTR_ROOM_DEVICE]: "1" })];
+    const roles = resolveDeviceRoles({ myId: "kiosk", roomState: "connected", members: selfOnly, lastRoles: held, connectedSince: 1000, now: 1500, settleMs: 1500 });
+    expect(roles).toBe(held); // still held → kiosk mic stays off while the human's attrs resync
+  });
+
+  it("connected + self-only AFTER the settle → recomputes → kiosk reclaims the mic (everyone left)", () => {
+    const held = { isMicSource: false, isAudioSink: false };
+    const selfOnly = [P("kiosk", { [ATTR_CLUSTER]: "kiosk", [ATTR_LEADER]: "kiosk", [ATTR_ROOM_DEVICE]: "1" })];
+    const roles = resolveDeviceRoles({ myId: "kiosk", roomState: "connected", members: selfOnly, lastRoles: held, connectedSince: 1000, now: 3000, settleMs: 1500 });
+    expect(roles.isMicSource).toBe(true); // genuine solo → reclaim, so the room isn't left without a mic
+  });
+
   it("a fresh device with no roles yet assumes it is the mic + sink (seed)", () => {
     expect(resolveDeviceRoles({ myId: null, roomState: "connecting", members: [], lastRoles: bothTrue })).toBe(bothTrue);
   });

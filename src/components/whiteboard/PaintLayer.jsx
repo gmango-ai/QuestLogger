@@ -100,6 +100,11 @@ const PaintLayer = forwardRef(function PaintLayer({ boardId, enabled, zIndex = 5
     restore: (map) => {
       if (!map) return;
       for (const [key, url] of map) {
+        // This tile is being RESTORED (undo of a clear), not cleared — drop it
+        // from clearedKeys so a flush that lands before the async image redraw
+        // can't mistake it for an empty clear and delete+evict it (losing the
+        // undo). It re-uploads with real pixels once the image lands.
+        if (storeRef.current.clearedKeys) storeRef.current.clearedKeys.delete(key);
         const [tx, ty] = key.split("_").map(Number);
         const tile = ensureTile(storeRef.current, tx, ty);
         const ctx = tile.ctx;

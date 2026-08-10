@@ -25,6 +25,14 @@ describe("planTileFlush — upload vs delete/evict split", () => {
     expect(evict).toEqual([]);
   });
 
+  it("an empty tile NOT marked cleared is uploaded, never evicted — protects an in-flight undo restore", () => {
+    // `restore` removes its keys from clearedKeys, so a tile whose image redraw
+    // hasn't landed yet (still empty) can't be mistaken for an empty clear.
+    const { uploads, evict } = planTileFlush([tile("0_0")], new Set(["9_9"]), () => false);
+    expect(uploads.map((t) => t.key)).toEqual(["0_0"]);
+    expect(evict).toEqual([]);
+  });
+
   it("skips non-dirty tiles and clears the dirty flag on processed ones", () => {
     const dirty = tile("1_1", true);
     const clean = tile("2_2", false);
