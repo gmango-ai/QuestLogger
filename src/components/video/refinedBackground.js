@@ -322,6 +322,28 @@ class RefinedBackgroundProcessor {
   }
 
   async restart(processorOptions) {
+    const track = processorOptions?.track;
+    // Fast path: LiveKit calls restart() with a brand-new raw MediaStreamTrack on
+    // every camera mute/unmute AND device switch (unmute() re-acquires the
+    // device) — NOT just on a genuine effect change. The GL pipeline, MediaPipe
+    // segmenter, and RVM worker are all still warm; only the source track
+    // changed. Previously this fell through to destroy()+init(), which tore down
+    // and rebuilt everything from scratch INCLUDING an RVM model re-fetch over
+    // the network — leaving the self-view blank (_haveMask resets to 0) for the
+    // whole multi-second reinit on every single toggle. _uploadVideo() uploads
+    // the video element at its own native size each frame, and the FBOs/canvas
+    // are a fixed processing resolution independent of the source, so rebinding
+    // a differently-sized replacement camera here is still safe.
+    if (track && this.gl && this.video) {
+      this._haveMask = 0;
+      this._hasPrev = 0;
+      this._busy = false;
+      this.source = track;
+      this.video.srcObject = new MediaStream([track]);
+      await this.video.play().catch(() => {});
+      await waitForVideo(this.video);
+      return;
+    }
     await this.destroy();
     await this.init(processorOptions);
   }
