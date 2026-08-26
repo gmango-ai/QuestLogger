@@ -61,6 +61,7 @@ const WhiteboardsListPage = lazy(() => import("./pages/WhiteboardsListPage"));
 const WhiteboardPage = lazy(() => import("./pages/WhiteboardPage"));
 const PublicWhiteboardPage = lazy(() => import("./pages/PublicWhiteboardPage"));
 const GuestRoomPage = lazy(() => import("./pages/GuestRoomPage"));
+const CrdtSpikePage = lazy(() => import("./pages/CrdtSpikePage")); // spike: docs/plans/whiteboard-crdt-local-first.md
 const OfficePage = lazy(() => import("./pages/OfficePage"));
 const MeetingSummariesPage = lazy(() => import("./pages/MeetingSummariesPage"));
 const CalendarPage = lazy(() => import("./pages/CalendarPage"));
@@ -712,6 +713,10 @@ export default function App() {
               outsider signs in anonymously, redeems the token, and enters just
               this one room's call + whiteboard (least-privilege guest mode). */}
           <Route path="/office/guest/:token" element={<GuestRoomPage />} />
+          {/* CRDT proof-of-concept (public so it's testable in 2 tabs w/o login).
+              Behind its own route; touches no production whiteboard code. */}
+          <Route path="/spike/crdt" element={<CrdtSpikePage />} />
+          <Route path="/spike/crdt/:boardId" element={<CrdtSpikePage />} />
           <Route
             path="/*"
             element={isDevice ? <DeviceKioskPage session={session} /> : session ? <AuthenticatedApp session={session} /> : <LocalTimerPage />}

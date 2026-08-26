@@ -75,15 +75,21 @@
     "recharts": "^3.8.1",
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
-    "tailwind-merge": "^2.6.0"
+    "tailwind-merge": "^2.6.0",
+    "y-indexeddb": "^9.0.12",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.31"
   },
   "devDependencies": {
     "@capacitor-community/electron": "^5.0.1",
     "@capacitor/assets": "^3.0.5",
     "@capacitor/cli": "^8.4.0",
     "@tailwindcss/vite": "^4.1.12",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.2",
     "@vitejs/plugin-react": "^4.3.4",
     "city-timezones": "^1.3.4",
+    "jsdom": "^29.1.1",
     "tailwindcss": "^4.1.12",
     "vite": "^6.1.0",
     "vite-plugin-pwa": "^1.2.0",
