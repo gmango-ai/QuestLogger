@@ -2116,7 +2116,19 @@ const ClusterParticipantTile = memo(function ClusterParticipantTile({ trackRef: 
       )}
     </div>
   );
-}, (a, b) => refKey(a.trackRef) === refKey(b.trackRef));
+}, (a, b) => {
+  if (refKey(a.trackRef) !== refKey(b.trackRef)) return false;
+  // refKey is just "identity:source", which stays IDENTICAL across a camera
+  // mute/republish cycle (setCameraEnabled(false) then (true) hands the SDK a
+  // brand-new LocalTrackPublication + trackSid, same identity+source). Bailing
+  // out on refKey alone froze this tile on the stale trackRef forever — the new
+  // publication/track never reached ParticipantTile's VideoTrack, so the camera
+  // kept capturing (OS indicator on) while the tile rendered nothing. Comparing
+  // trackSid + isMuted too still skips the frequent pure-active-speaker re-
+  // renders (neither changes then) but no longer skips a genuine track swap.
+  const pa = a.trackRef?.publication, pb = b.trackRef?.publication;
+  return (pa?.trackSid || null) === (pb?.trackSid || null) && !!pa?.isMuted === !!pb?.isMuted;
+});
 // memo(refKey): the Stage re-renders on every active-speaker transition (several
 // times/sec in conversation) and rebuilds the tiles array with fresh elements.
 // Active-speaker changes do NOT touch the cluster context, so tiles whose track
